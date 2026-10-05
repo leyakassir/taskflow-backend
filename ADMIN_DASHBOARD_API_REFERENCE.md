@@ -29,6 +29,7 @@ TaskFlow is a task execution and workforce-management platform: administrators a
 | @nestjs/throttler | Request throttling; only login explicitly attaches its guard. |
 | @prisma/client | ORM client and generated model/types. |
 | bcryptjs | Password hashing and comparison. |
+| firebase-admin | Initializes Firebase Admin from private credentials and sends task push notifications; when credentials are absent, push delivery is disabled. |
 | class-transformer | DTO transformation and nested DTO instantiation. |
 | class-validator | Request DTO validation. |
 | helmet | Installed but not imported/applied in main.ts. |
@@ -72,8 +73,10 @@ There is no .env.example in the backend directory. These names are from .env; th
 | JWT_SECRET | Secret used to sign and verify access tokens. App startup throws if absent. | **Yes.** Generate a private local secret; never share or commit it. |
 | JWT_EXPIRES_IN_SECONDS | Access-token lifetime in seconds; source defaults to 900 if absent. Current .env configures 900 seconds (15 minutes). | Usually choose the intended local lifetime. |
 | CORS_ORIGINS | Comma-separated browser-origin allowlist. If empty, main.ts uses its fallback list in §10. | **Yes for the dashboard.** Add the dashboard origin including scheme and port. |
+| FIREBASE_SERVICE_ACCOUNT_PATH | Path to the Firebase Admin service-account JSON file. Used only for push notifications. | Optional locally; configure with a private credential file to enable push. |
+| FIREBASE_SERVICE_ACCOUNT_JSON | Firebase Admin service-account JSON string; alternative to the path above. | Optional locally; keep the value private and never commit it. |
 
-These are all five variable names found in the backend .env. Do not copy another developer's .env; configure local values for database, JWT secret, port, and dashboard origin.
+The five variables already present in .env plus the two optional Firebase variables read by the source are documented here. Do not copy another developer's .env; configure local values for database, JWT secret, port, dashboard origin, and (if needed) Firebase credentials.
 
 ## 4. Authentication
 
@@ -189,6 +192,7 @@ All routes use JwtAuthGuard and operate on req.user.id.
 | PATCH /me | { fullName?: string }; if present it must be a string with min length 2. | Same selected user as GET /me. |
 | PATCH /me/password | { currentPassword: string, newPassword: string }; both required, each min 8. | { success: true }; wrong current password is 400. |
 | POST /me/avatar | multipart/form-data with one file field named file. MIME allowlist jpeg/png/webp/gif/heic/heif; max 10 MiB. | { avatarUrl: string }, value is /uploads/avatars/<generated-name>. See §8. |
+| POST /me/device-token | { token: string }, required nonempty string. JWT required. | { success: true }; upserts by unique token and reassigns an existing token to the current user. |
 
 ### Tasks controller (/tasks)
 
@@ -196,9 +200,9 @@ Every task route uses controller-level JwtAuthGuard. Additional role restriction
 
 | Method/path | Additional guard/role | Request | Response / validation |
 |---|---|---|---|
-| POST /tasks | RolesGuard; ADMIN or MANAGER | CreateTaskDto: title: string required; description?: string; priority?: TaskPriority declared; assigneeId: string required; deadline?: ISO date string; startDate?: ISO date string; location?: string; minPhotosRequired?: integer >= 0; minFilesRequired?: integer >= 0; checklistItems?: { label: string }[]. Each checklist label is string. | Task + relations. Assignee must exist, be active, and be WORKER. requiresChecklist is set from whether checklistItems has entries. **priority has no class-validator decorator; with whitelist and forbidNonWhitelisted enabled, sending it is rejected as non-whitelisted (400). Omit it to use Prisma's MEDIUM default.** |
+| POST /tasks | RolesGuard; ADMIN or MANAGER | CreateTaskDto: title: string required; description?: string; priority?: TaskPriority declared; assigneeId: string required; deadline?: ISO date string; startDate?: ISO date string; location?: string; minPhotosRequired?: integer >= 0; minFilesRequired?: integer >= 0; checklistItems?: { label: string }[]. Each checklist label is string. | Task + relations. Assignee must exist, be active, and be WORKER. requiresChecklist is set from whether checklistItems has entries. **If deadline is omitted, service sets it to seven days from creation. priority has no class-validator decorator; with whitelist and forbidNonWhitelisted enabled, sending it is rejected as non-whitelisted (400). Omit it to use Prisma's MEDIUM default.** |
 | PATCH /tasks/:id | RolesGuard; ADMIN or MANAGER | Optional UpdateTaskDto fields: title?: string; description?: string; priority?: TaskPriority enum; deadline?: ISO date string; startDate?: ISO date string; location?: string; minPhotosRequired?: integer >= 0; minFilesRequired?: integer >= 0; requiresChecklist?: boolean. | Task + relations; 404 if absent. Does not change assignee; use /assign. Nullish/omitted service values are left unchanged. |
-| GET /tasks | No extra role guard | No body. | Array of Task + relations ordered by createdAt descending. WORKER sees assigned tasks only; ADMIN/MANAGER see all. |
+| GET /tasks | No extra role guard | Query: page?: integer >= 1 (default 1), limit?: integer >= 1 (default 20; values above 100 are capped at 100). | `{ data: Task[], page: number, limit: number, total: number, totalPages: number }`; each task includes checklistItems and attachments, ordered newest first. WORKER sees assigned tasks only; ADMIN/MANAGER see all. |
 | GET /tasks/:id | No extra role guard; ownership/admin/manager check | Path ID; no body. | Task + relations; 404 absent, 403 for a worker not assigned. |
 | PATCH /tasks/:id/status | No extra role guard; ownership/admin/manager check | { status: TaskStatus }, required enum. | Task scalars only. Allowed transitions: ASSIGNED -> IN_PROGRESS or CANCELLED; IN_PROGRESS -> COMPLETED or CANCELLED; OVERDUE -> IN_PROGRESS or CANCELLED; COMPLETED/CANCELLED have no outgoing transitions. Invalid transition is 400. **IN_PROGRESS -> COMPLETED here bypasses checklist and completion metadata logic.** |
 | PATCH /tasks/:id/complete | No extra role guard; worker must be assignee; ADMIN/MANAGER are not restricted by assignment | CompleteTaskDto: notes?: string; checklistResults?: { id: UUID, done: boolean }[]; photos?: { url: string, mimeType: string, sizeBytes: integer }[]; files?: same object array. All optional. Checklist IDs must belong to task and be unique. | Task + relations. Requires exactly IN_PROGRESS; if requiresChecklist is true, all stored items must be marked done. Checklist changes and completion update are transactional. photos/files arrays insert metadata rows; they do not upload or validate file contents. |
@@ -208,7 +212,7 @@ Every task route uses controller-level JwtAuthGuard. Additional role restriction
 | DELETE /tasks/:id/checklist/:itemId | RolesGuard; ADMIN or MANAGER | No body. | { success: true }; 404 if absent or attached to another task. |
 | GET /tasks/:id/attachments | No extra role guard; ownership/admin/manager check | No body. | TaskAttachment array, newest first; 404 missing task, 403 unauthorized worker. |
 | DELETE /tasks/:id/attachments/:attId | RolesGuard; ADMIN or MANAGER | No body. | { success: true }; 404 absent or not attached to that task. Deletes DB row only, not disk file. |
-| POST /tasks/:id/attachments | No extra role guard; only class-level JWT | multipart/form-data fields: file (one file, max 10 MiB) and kind string exactly PHOTO or FILE. | TaskAttachment row. Maps PHOTO to COMPLETION_PHOTO and FILE to COMPLETION_FILE. URL is /uploads/<generated-name>. 400 missing file/invalid kind. **No MIME/extension allowlist and no assignee/ownership check.** |
+| POST /tasks/:id/attachments | No extra role guard; class-level JWT plus task ownership/assignment check (ADMIN/MANAGER allowed) | multipart/form-data fields: file (one file, max 10 MiB) and kind string exactly PHOTO or FILE. | TaskAttachment row. Maps PHOTO to COMPLETION_PHOTO and FILE to COMPLETION_FILE. URL is /uploads/<generated-name>. 400 missing file/invalid kind; 404 missing task; 403 when a worker is not assigned. **The Multer interceptor writes the uploaded file before the service authorization check, so an unauthorized upload may leave an unreferenced disk file.** |
 
 CompleteTaskDto photos/files only validate object fields as strings and integer sizeBytes. There is no nonnegative size constraint, file-size check, or MIME validation for those metadata values.
 
