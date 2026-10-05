@@ -1,0 +1,124 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  WORKER
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  fullName     String
+  role         UserRole @default(WORKER)
+  isActive     Boolean  @default(true)
+  avatarUrl    String?
+
+  assignedTasks Task[] @relation("AssignedTasks")
+  createdTasks  Task[] @relation("CreatedTasks")
+  deviceTokens  DeviceToken[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model DeviceToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TaskStatus {
+  ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+  OVERDUE
+  CANCELLED
+}
+
+model Task {
+  id          String       @id @default(uuid())
+  title       String
+  description String?
+  priority    TaskPriority @default(MEDIUM)
+  status      TaskStatus   @default(ASSIGNED)
+
+  deadline  DateTime?
+  startDate DateTime?
+
+  location String?
+
+  // completion requirements set by the admin at creation time
+  minPhotosRequired Int     @default(0)
+  minFilesRequired  Int     @default(0)
+  requiresChecklist Boolean @default(false)
+
+  assigneeId String
+  assignee   User   @relation("AssignedTasks", fields: [assigneeId], references: [id])
+
+  createdById String
+  createdBy   User   @relation("CreatedTasks", fields: [createdById], references: [id])
+
+  checklistItems TaskChecklistItem[]
+  attachments    TaskAttachment[]
+
+  completionNotes     String?
+  completionTimestamp DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([assigneeId])
+  @@index([status])
+}
+
+model TaskChecklistItem {
+  id     String  @id @default(uuid())
+  taskId String
+  task   Task    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  label  String
+  done   Boolean @default(false)
+
+  @@index([taskId])
+}
+
+model TaskAttachment {
+  id     String @id @default(uuid())
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  // set by the admin (instructions) or by the worker (completion evidence)
+  kind      TaskAttachmentKind
+  url       String
+  mimeType  String
+  sizeBytes Int
+
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+}
+
+enum TaskAttachmentKind {
+  INSTRUCTION
+  COMPLETION_PHOTO
+  COMPLETION_FILE
+}
