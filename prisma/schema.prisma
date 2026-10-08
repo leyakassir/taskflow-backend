@@ -22,9 +22,11 @@ model User {
   isActive     Boolean  @default(true)
   avatarUrl    String?
 
-  assignedTasks Task[] @relation("AssignedTasks")
-  createdTasks  Task[] @relation("CreatedTasks")
+  assignedTasks Task[]         @relation("AssignedTasks")
+  createdTasks  Task[]         @relation("CreatedTasks")
   deviceTokens  DeviceToken[]
+  notifications Notification[]
+  taskComments  TaskComment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -38,6 +40,43 @@ model DeviceToken {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+enum NotificationKind {
+  TASK_ASSIGNED
+  TASK_REASSIGNED
+  TASK_UNASSIGNED
+  TASK_DUE_SOON
+  TASK_OVERDUE
+  TASK_CANCELLED
+  TASK_UPDATED
+  TASK_SUBMITTED
+  TASK_COMMENT
+  DAILY_SUMMARY
+  GENERIC
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      NotificationKind
+  title     String
+  body      String           @db.Text
+  taskId    String?
+  task      Task?            @relation(fields: [taskId], references: [id])
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  // Identifies the event this notification is about (e.g. "comment:<id>",
+  // "due-24h:<taskId>:<deadline>"). One notification per user per event,
+  // so repeated jobs, retries and restarts never send duplicates.
+  dedupeKey String
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+  @@index([taskId])
 }
 
 enum TaskPriority {
@@ -59,6 +98,9 @@ model Task {
   id          String       @id @default(uuid())
   title       String
   description String?
+  // Optional Arabic versions shown by the app when its language is Arabic.
+  titleAr       String?
+  descriptionAr String? @db.Text
   priority    TaskPriority @default(MEDIUM)
   status      TaskStatus   @default(ASSIGNED)
 
@@ -72,23 +114,32 @@ model Task {
   minFilesRequired  Int     @default(0)
   requiresChecklist Boolean @default(false)
 
-  assigneeId String
-  assignee   User   @relation("AssignedTasks", fields: [assigneeId], references: [id])
+  assigneeId String?
+  assignee   User?   @relation("AssignedTasks", fields: [assigneeId], references: [id])
 
   createdById String
   createdBy   User   @relation("CreatedTasks", fields: [createdById], references: [id])
 
   checklistItems TaskChecklistItem[]
   attachments    TaskAttachment[]
+  notifications  Notification[]
+  comments       TaskComment[]
 
   completionNotes     String?
   completionTimestamp DateTime?
+
+  // Set when the reminder job moves the task to OVERDUE. Stops the job from
+  // re-marking a task the worker restarted (OVERDUE -> IN_PROGRESS); cleared
+  // when the deadline changes.
+  markedOverdueAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([assigneeId])
   @@index([status])
+  @@index([deadline])
+  @@index([assigneeId, deadline])
 }
 
 model TaskChecklistItem {
@@ -121,4 +172,16 @@ enum TaskAttachmentKind {
   INSTRUCTION
   COMPLETION_PHOTO
   COMPLETION_FILE
+}
+
+model TaskComment {
+  id        String   @id @default(uuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id])
+  body      String   @db.VarChar(1000)
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
 }

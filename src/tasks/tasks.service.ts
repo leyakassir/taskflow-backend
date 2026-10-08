@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service.js';
-import { TaskAttachmentKind, TaskPriority, TaskStatus, UserRole } from '@prisma/client';
+import { Prisma, type Task, TaskAttachmentKind, TaskPriority, TaskStatus, UserRole } from '@prisma/client';
 import { CreateTaskDto } from './dto/create-task.dto.js';
 import { UpdateTaskDto } from './dto/update-task.dto.js';
 import { UpdateTaskStatusDto } from './dto/update-task-status.dto.js';
@@ -20,6 +20,19 @@ const ALLOWED_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   OVERDUE: ['IN_PROGRESS', 'CANCELLED'],
   CANCELLED: [],
 };
+
+// Task fields the assignee is told about when an admin/manager edits them.
+const NOTIFIED_FIELDS: ReadonlyArray<[keyof Task, string]> = [
+  ['title', 'title'],
+  ['priority', 'priority'],
+  ['deadline', 'deadline'],
+  ['location', 'location'],
+];
+
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  return a === b;
+}
 
 function addDays(date: Date, days: number): Date {
   const result = new Date(date);
@@ -42,7 +55,7 @@ export class TasksService {
     }
   }
 
-  private assertCanAccess(task: { assigneeId: string }, user: RequestUser) {
+  private assertCanAccess(task: { assigneeId: string | null }, user: RequestUser) {
     const isOwner = task.assigneeId === user.id;
     const isPrivileged = user.role === UserRole.ADMIN || user.role === UserRole.MANAGER;
     if (!isOwner && !isPrivileged) {
@@ -51,12 +64,14 @@ export class TasksService {
   }
 
   async create(dto: CreateTaskDto, createdBy: RequestUser) {
-    await this.ensureAssigneeIsActiveWorker(dto.assigneeId);
+    if (dto.assigneeId) await this.ensureAssigneeIsActiveWorker(dto.assigneeId);
 
     const task = await this.prisma.task.create({
       data: {
         title: dto.title,
         description: dto.description,
+        titleAr: dto.titleAr,
+        descriptionAr: dto.descriptionAr,
         priority: dto.priority as TaskPriority,
         deadline: dto.deadline ? new Date(dto.deadline) : addDays(new Date(), 7),
         startDate: dto.startDate ? new Date(dto.startDate) : undefined,
@@ -64,7 +79,7 @@ export class TasksService {
         minPhotosRequired: dto.minPhotosRequired ?? 0,
         minFilesRequired: dto.minFilesRequired ?? 0,
         requiresChecklist: !!dto.checklistItems?.length,
-        assigneeId: dto.assigneeId,
+        assigneeId: dto.assigneeId ?? null,
         createdById: createdBy.id,
         checklistItems: dto.checklistItems
           ? { create: dto.checklistItems.map((c: { label: string }) => ({ label: c.label })) }
@@ -72,25 +87,28 @@ export class TasksService {
       },
       include: { checklistItems: true, attachments: true },
     });
-    await this.notifications.sendTaskNotification(
-      task.assigneeId,
-      'New task assigned',
-      task.title,
-      task.id,
-    );
+    if (task.assigneeId) {
+      await this.notifications.emitTaskAssigned(task, task.assigneeId, createdBy.id);
+    }
     return task;
   }
 
-  async updateTask(taskId: string, dto: UpdateTaskDto) {
+  async updateTask(taskId: string, dto: UpdateTaskDto, actor: RequestUser) {
     // Exists?
     const task = await this.prisma.task.findUnique({ where: { id: taskId } });
     if (!task) throw new NotFoundException('Task not found');
 
-    return this.prisma.task.update({
+    // A new deadline may become overdue again later.
+    const deadlineChanged =
+      !!dto.deadline && new Date(dto.deadline).getTime() !== task.deadline?.getTime();
+
+    const updated = await this.prisma.task.update({
       where: { id: taskId },
       data: {
         title: dto.title ?? undefined,
         description: dto.description ?? undefined,
+        titleAr: dto.titleAr ?? undefined,
+        descriptionAr: dto.descriptionAr ?? undefined,
         priority: dto.priority ?? undefined,
         deadline: dto.deadline ? new Date(dto.deadline) : undefined,
         startDate: dto.startDate ? new Date(dto.startDate) : undefined,
@@ -98,27 +116,53 @@ export class TasksService {
         minPhotosRequired: typeof dto.minPhotosRequired === 'number' ? dto.minPhotosRequired : undefined,
         minFilesRequired: typeof dto.minFilesRequired === 'number' ? dto.minFilesRequired : undefined,
         requiresChecklist: typeof dto.requiresChecklist === 'boolean' ? dto.requiresChecklist : undefined,
+        markedOverdueAt: deadlineChanged ? null : undefined,
       },
       include: { checklistItems: true, attachments: true },
     });
+
+    const changed = NOTIFIED_FIELDS.filter(([key]) => !sameValue(task[key], updated[key])).map(
+      ([key, label]) =>
+        key === 'priority' ? `priority (now ${updated.priority.toLowerCase()})` : label,
+    );
+    const isFinal = updated.status === TaskStatus.COMPLETED || updated.status === TaskStatus.CANCELLED;
+    if (changed.length > 0 && !isFinal) {
+      await this.notifications.emitTaskUpdated(updated, changed, actor.id);
+    }
+    return updated;
   }
 
-  async assignTask(taskId: string, assigneeId: string) {
+  async assignTask(taskId: string, assigneeId: string, actor: RequestUser) {
     await this.ensureAssigneeIsActiveWorker(assigneeId);
     const t = await this.prisma.task.findUnique({ where: { id: taskId } });
     if (!t) throw new NotFoundException('Task not found');
     if (['COMPLETED', 'CANCELLED'].includes(t.status)) {
       throw new BadRequestException('Cannot reassign a finalized task');
     }
-    return this.prisma.task.update({
+    const updated = await this.prisma.task.update({
       where: { id: taskId },
       data: { assigneeId },
       include: { checklistItems: true, attachments: true },
     });
+    // Re-assigning to the same worker is not a new event.
+    if (t.assigneeId !== assigneeId) {
+      await this.notifications.emitTaskAssigned(updated, assigneeId, actor.id, !!t.assigneeId);
+      if (t.assigneeId) {
+        await this.notifications.emitTaskUnassigned(updated, t.assigneeId, actor.id);
+      }
+    }
+    return updated;
   }
 
-  async findAllForUser(user: RequestUser, page = 1, requestedLimit = 20) {
-    const where = user.role === UserRole.WORKER ? { assigneeId: user.id } : undefined;
+  async findAllForUser(
+    user: RequestUser,
+    page = 1,
+    requestedLimit = 20,
+    range?: { from?: string; to?: string },
+  ) {
+    const scope: Prisma.TaskWhereInput =
+      user.role === UserRole.WORKER ? { assigneeId: user.id } : {};
+    const where: Prisma.TaskWhereInput = { AND: [scope, this.dateRangeFilter(range)] };
     const limit = Math.min(requestedLimit, 100);
     const [data, total] = await Promise.all([
       this.prisma.task.findMany({
@@ -131,6 +175,30 @@ export class TasksService {
       this.prisma.task.count({ where }),
     ]);
     return { data, page, limit, total, totalPages: Math.ceil(total / limit) };
+  }
+
+  // Matches tasks whose deadline or startDate falls inside the range.
+  // Either bound may be omitted; no bounds means no filter.
+  private dateRangeFilter(range?: { from?: string; to?: string }): Prisma.TaskWhereInput {
+    if (!range?.from && !range?.to) return {};
+    const from = range.from ? new Date(range.from) : undefined;
+    const to = range.to ? new Date(range.to) : undefined;
+    if (from && to && from > to) {
+      throw new BadRequestException('"from" must be before or equal to "to"');
+    }
+    const bounds = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+    return { OR: [{ deadline: bounds }, { startDate: bounds }] };
+  }
+
+  /** Loads the fields task-scoped features need, after the access check. */
+  async getAccessibleTask(taskId: string, user: RequestUser) {
+    const task = await this.prisma.task.findUnique({
+      where: { id: taskId },
+      select: { id: true, title: true, status: true, assigneeId: true, createdById: true },
+    });
+    if (!task) throw new NotFoundException('Task not found');
+    this.assertCanAccess(task, user);
+    return task;
   }
 
   async findOneForUser(taskId: string, user: RequestUser) {
@@ -153,12 +221,11 @@ export class TasksService {
       throw new BadRequestException(`Cannot transition task from ${task.status} to ${dto.status}`);
     }
     const updated = await this.prisma.task.update({ where: { id: taskId }, data: { status: dto.status } });
-    await this.notifications.sendTaskNotification(
-      updated.assigneeId,
-      'Task status updated',
-      `${updated.title}: ${updated.status}`,
-      updated.id,
-    );
+    if (updated.status === TaskStatus.CANCELLED) {
+      await this.notifications.emitTaskCancelled(updated, user.id);
+    } else if (updated.status === TaskStatus.COMPLETED) {
+      await this.notifications.emitTaskSubmitted(updated, user.id);
+    }
     return updated;
   }
 
@@ -198,7 +265,7 @@ export class TasksService {
       }
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const completed = await this.prisma.$transaction(async (tx) => {
       if (dto.checklistResults?.length) {
         for (const c of dto.checklistResults) {
           const res = await tx.taskChecklistItem.updateMany({
@@ -237,6 +304,8 @@ export class TasksService {
         include: { checklistItems: true, attachments: true },
       });
     });
+    await this.notifications.emitTaskSubmitted(completed, user.id);
+    return completed;
   }
 
   // Checklist CRUD (admin/manager)

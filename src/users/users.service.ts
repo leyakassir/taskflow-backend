@@ -3,6 +3,7 @@ import {
   BadRequestException,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../database/prisma.service.js';
 import { CreateUserDto } from './dto/create-user.dto.js';
@@ -125,11 +126,21 @@ export class UsersService {
 
   async registerDeviceToken(userId: string, token: string) {
     await this.ensureExists(userId);
-    await this.prisma.deviceToken.upsert({
-      where: { token },
-      update: { userId },
-      create: { token, userId },
-    });
+    try {
+      await this.prisma.deviceToken.upsert({
+        where: { token },
+        update: { userId },
+        create: { token, userId },
+      });
+    } catch (error) {
+      // The app can register the same token twice at once (login and token
+      // refresh). Upsert is not atomic, so the second create can hit the
+      // unique index; the row exists by then, so just point it at this user.
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+        throw error;
+      }
+      await this.prisma.deviceToken.update({ where: { token }, data: { userId } });
+    }
     return { success: true };
   }
 

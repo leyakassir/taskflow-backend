@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'node:path';
 
@@ -9,11 +10,13 @@ import { AuthModule } from './auth/auth.module.js';
 import { TasksModule } from './tasks/tasks.module.js';
 import { UsersModule } from './users/users.module.js';
 import { ContentModule } from './content/content.module.js';
+import { NotificationsModule } from './notifications/notifications.module.js';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 5 }]),
+    ScheduleModule.forRoot(),
     // Serve static assets for legal pages and uploaded attachments
     ServeStaticModule.forRoot(
       {
@@ -29,6 +32,7 @@ import { ContentModule } from './content/content.module.js';
     AuthModule,
     UsersModule,
     TasksModule,
+    NotificationsModule,
     ContentModule,
   ],
 })

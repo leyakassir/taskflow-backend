@@ -46,14 +46,17 @@ export class TasksController {
 
   @UseGuards(RolesGuard) @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Patch(':id')
-  update(@Param('id') id: string, @Body() dto: UpdateTaskDto) {
-    return this.tasksService.updateTask(id, dto);
+  update(@Param('id') id: string, @Body() dto: UpdateTaskDto, @Req() req: AuthenticatedRequest) {
+    return this.tasksService.updateTask(id, dto, req.user);
   }
 
   // List and read (scoped)
   @Get()
   findAll(@Req() req: AuthenticatedRequest, @Query() query: ListTasksQueryDto) {
-    return this.tasksService.findAllForUser(req.user, query.page, query.limit);
+    return this.tasksService.findAllForUser(req.user, query.page, query.limit, {
+      from: query.from,
+      to: query.to,
+    });
   }
 
   @Get(':id')
@@ -83,8 +86,8 @@ export class TasksController {
   // Assign / Reassign (admin/manager)
   @UseGuards(RolesGuard) @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Patch(':id/assign')
-  assign(@Param('id') id: string, @Body() dto: AssignTaskDto) {
-    return this.tasksService.assignTask(id, dto.assigneeId);
+  assign(@Param('id') id: string, @Body() dto: AssignTaskDto, @Req() req: AuthenticatedRequest) {
+    return this.tasksService.assignTask(id, dto.assigneeId, req.user);
   }
 
   // Checklist CRUD (admin/manager)

@@ -200,9 +200,9 @@ Every task route uses controller-level JwtAuthGuard. Additional role restriction
 
 | Method/path | Additional guard/role | Request | Response / validation |
 |---|---|---|---|
-| POST /tasks | RolesGuard; ADMIN or MANAGER | CreateTaskDto: title: string required; description?: string; priority?: TaskPriority declared; assigneeId: string required; deadline?: ISO date string; startDate?: ISO date string; location?: string; minPhotosRequired?: integer >= 0; minFilesRequired?: integer >= 0; checklistItems?: { label: string }[]. Each checklist label is string. | Task + relations. Assignee must exist, be active, and be WORKER. requiresChecklist is set from whether checklistItems has entries. **If deadline is omitted, service sets it to seven days from creation. priority has no class-validator decorator; with whitelist and forbidNonWhitelisted enabled, sending it is rejected as non-whitelisted (400). Omit it to use Prisma's MEDIUM default.** |
-| PATCH /tasks/:id | RolesGuard; ADMIN or MANAGER | Optional UpdateTaskDto fields: title?: string; description?: string; priority?: TaskPriority enum; deadline?: ISO date string; startDate?: ISO date string; location?: string; minPhotosRequired?: integer >= 0; minFilesRequired?: integer >= 0; requiresChecklist?: boolean. | Task + relations; 404 if absent. Does not change assignee; use /assign. Nullish/omitted service values are left unchanged. |
-| GET /tasks | No extra role guard | Query: page?: integer >= 1 (default 1), limit?: integer >= 1 (default 20; values above 100 are capped at 100). | `{ data: Task[], page: number, limit: number, total: number, totalPages: number }`; each task includes checklistItems and attachments, ordered newest first. WORKER sees assigned tasks only; ADMIN/MANAGER see all. |
+| POST /tasks | RolesGuard; ADMIN or MANAGER | CreateTaskDto: title: string required; description?: string; titleAr?: string; descriptionAr?: string (optional Arabic title/description shown by the app in Arabic); priority?: TaskPriority declared; assigneeId: string required; deadline?: ISO date string; startDate?: ISO date string; location?: string; minPhotosRequired?: integer >= 0; minFilesRequired?: integer >= 0; checklistItems?: { label: string }[]. Each checklist label is string. | Task + relations. Assignee must exist, be active, and be WORKER. requiresChecklist is set from whether checklistItems has entries. **If deadline is omitted, service sets it to seven days from creation. priority has no class-validator decorator; with whitelist and forbidNonWhitelisted enabled, sending it is rejected as non-whitelisted (400). Omit it to use Prisma's MEDIUM default.** |
+| PATCH /tasks/:id | RolesGuard; ADMIN or MANAGER | Optional UpdateTaskDto fields: title?: string; description?: string; titleAr?: string; descriptionAr?: string; priority?: TaskPriority enum; deadline?: ISO date string; startDate?: ISO date string; location?: string; minPhotosRequired?: integer >= 0; minFilesRequired?: integer >= 0; requiresChecklist?: boolean. | Task + relations; 404 if absent. Does not change assignee; use /assign. Nullish/omitted service values are left unchanged. |
+| GET /tasks | No extra role guard | Query: page?: integer >= 1 (default 1), limit?: integer >= 1 (default 20; values above 100 are capped at 100), from?: ISO 8601 date string, to?: ISO 8601 date string. | `{ data: Task[], page: number, limit: number, total: number, totalPages: number }`; each task includes checklistItems and attachments, ordered newest first. WORKER sees assigned tasks only; ADMIN/MANAGER see all. When from and/or to are given, only tasks whose deadline **or** startDate falls within [from, to] (inclusive) are returned; the role scoping and pagination still apply. from later than to is 400; a non-ISO value is 400. |
 | GET /tasks/:id | No extra role guard; ownership/admin/manager check | Path ID; no body. | Task + relations; 404 absent, 403 for a worker not assigned. |
 | PATCH /tasks/:id/status | No extra role guard; ownership/admin/manager check | { status: TaskStatus }, required enum. | Task scalars only. Allowed transitions: ASSIGNED -> IN_PROGRESS or CANCELLED; IN_PROGRESS -> COMPLETED or CANCELLED; OVERDUE -> IN_PROGRESS or CANCELLED; COMPLETED/CANCELLED have no outgoing transitions. Invalid transition is 400. **IN_PROGRESS -> COMPLETED here bypasses checklist and completion metadata logic.** |
 | PATCH /tasks/:id/complete | No extra role guard; worker must be assignee; ADMIN/MANAGER are not restricted by assignment | CompleteTaskDto: notes?: string; checklistResults?: { id: UUID, done: boolean }[]; photos?: { url: string, mimeType: string, sizeBytes: integer }[]; files?: same object array. All optional. Checklist IDs must belong to task and be unique. | Task + relations. Requires exactly IN_PROGRESS; if requiresChecklist is true, all stored items must be marked done. Checklist changes and completion update are transactional. photos/files arrays insert metadata rows; they do not upload or validate file contents. |
@@ -215,6 +215,46 @@ Every task route uses controller-level JwtAuthGuard. Additional role restriction
 | POST /tasks/:id/attachments | No extra role guard; class-level JWT plus task ownership/assignment check (ADMIN/MANAGER allowed) | multipart/form-data fields: file (one file, max 10 MiB) and kind string exactly PHOTO or FILE. | TaskAttachment row. Maps PHOTO to COMPLETION_PHOTO and FILE to COMPLETION_FILE. URL is /uploads/<generated-name>. 400 missing file/invalid kind; 404 missing task; 403 when a worker is not assigned. **The Multer interceptor writes the uploaded file before the service authorization check, so an unauthorized upload may leave an unreferenced disk file.** |
 
 CompleteTaskDto photos/files only validate object fields as strings and integer sizeBytes. There is no nonnegative size constraint, file-size check, or MIME validation for those metadata values.
+
+### Task comments controller (/tasks/:id/comments)
+
+Both routes use JwtAuthGuard plus the same task access check as GET /tasks/:id: the assigned WORKER, or any ADMIN/MANAGER. A worker who is not the assignee gets 403; an unknown task ID gets 404. No RolesGuard: admins and managers can both read and reply on any task.
+
+| Method/path | Who can call | Request | Response / validation |
+|---|---|---|---|
+| GET /tasks/:id/comments | Assigned WORKER; any ADMIN/MANAGER | Query (ListTaskCommentsQueryDto): page?: integer >= 1 (default 1); limit?: integer >= 1 (default 20; values above 100 are capped at 100). | `{ data: TaskComment[], page, limit, total, totalPages }`, **oldest first** (createdAt ascending). Each item: `{ id, taskId, authorId, body, createdAt, author: { id, fullName, role, avatarUrl } }`; avatarUrl may be null and is a relative /uploads path. |
+| POST /tasks/:id/comments | Assigned WORKER; any ADMIN/MANAGER | CreateTaskCommentDto: `{ body: string }`, required. The value is trimmed first, then must be 1 to 1000 characters. Any other property is rejected (400, forbidNonWhitelisted). | 201 with the created comment, same shape as a list item. Whitespace-only or longer than 1000 characters is 400. |
+
+Comment notifications: when a WORKER comments, the task's creator (createdById) gets a stored notification of kind TASK_COMMENT plus a push. When an ADMIN or MANAGER comments, the task's assignee gets it. The author is never notified about their own comment, and inactive recipients are skipped. The notification has taskId set. The dashboard can show these with GET /notifications (kind TASK_COMMENT) and mark them read with PATCH /notifications/:id/read.
+
+### Notifications controller (/notifications)
+
+Both routes use JwtAuthGuard and only ever touch the caller's own notifications (any role).
+
+| Method/path | Request | Response / validation |
+|---|---|---|
+| GET /notifications | Query: unreadOnly?: "true" or "false". | Array of `{ id, userId, kind, title, body, taskId, readAt, createdAt }`, newest first; taskId and readAt may be null. Not paginated. |
+| PATCH /notifications/:id/read | No body. | The updated notification (readAt set; unchanged if already read). 404 if the ID is not one of the caller's notifications. |
+| PATCH /notifications/read-all | No body. | `{ updated: number }`: how many of the caller's unread notifications were marked read. Other users' notifications are never touched. |
+
+Notification kinds and who receives them (the person who caused an event is never notified about it, and inactive users are skipped):
+
+| kind | Sent to | When |
+|---|---|---|
+| TASK_ASSIGNED | New assignee | Task created with an assignee, or PATCH /tasks/:id/assign on a task that had no assignee. |
+| TASK_REASSIGNED | New assignee | PATCH /tasks/:id/assign moved the task from another worker to them. |
+| TASK_UNASSIGNED | Previous assignee | PATCH /tasks/:id/assign moved the task to someone else. |
+| TASK_UPDATED | Assignee | PATCH /tasks/:id actually changed title, priority, deadline or location; the body names the changed fields. Not sent for COMPLETED/CANCELLED tasks. |
+| TASK_CANCELLED | Assignee | Status changed to CANCELLED. |
+| TASK_SUBMITTED | Task creator (createdById) | Worker completed the task (PATCH /tasks/:id/complete, or status COMPLETED). |
+| TASK_COMMENT | Creator (worker commented) or assignee (admin/manager commented) | POST /tasks/:id/comments, unless the task is COMPLETED or CANCELLED. |
+| TASK_DUE_SOON | Assignee | Scheduled job: about 24 h and about 2 h before the deadline, for ASSIGNED/IN_PROGRESS tasks. Once per reminder per deadline. |
+| TASK_OVERDUE | Assignee and creator | Scheduled job marked the task OVERDUE (see below). |
+| DAILY_SUMMARY | Worker | Scheduled job, once per day on the first run between 08:00 and 12:00 server time: "You have N tasks due today", only when N > 0 (unfinished tasks with a deadline today). taskId is null. |
+
+Each event produces at most one notification per recipient (unique per user and event), so retries and job re-runs do not duplicate. The notification row is always stored, even when push is disabled or fails. A push is sent to the recipient's registered devices with data `{ notificationId, kind, taskId }` (taskId omitted for DAILY_SUMMARY); push failures are logged and never fail the API request. Device tokens Firebase reports as unregistered or invalid are deleted.
+
+**Automatic OVERDUE status:** the scheduled job (default every 5 minutes, REMINDER_CRON) sets status OVERDUE on ASSIGNED/IN_PROGRESS tasks whose deadline has passed, and records Task.markedOverdueAt. A task is marked once per deadline: after a worker restarts it (OVERDUE -> IN_PROGRESS), the job does not flip it back. Changing the deadline with PATCH /tasks/:id clears markedOverdueAt, so the new deadline can be marked overdue again. Transition rules are unchanged.
 
 ### Content controller routes
 
@@ -265,6 +305,7 @@ Prisma fields are required unless marked nullable or assigned a default. Relatio
 | location | String? | Nullable | |
 | minPhotosRequired | Int | Required, default 0 | Persisted but not enforced by completion method. |
 | minFilesRequired | Int | Required, default 0 | Persisted but not enforced by completion method. |
+| titleAr / descriptionAr | String? | Optional | Arabic title and description. The mobile app shows them when its language is Arabic and falls back to title/description when empty. Migration `20261008140000_task_arabic_fields`. |
 | requiresChecklist | Boolean | Required, default false | Gates checklist check in completion. |
 | assigneeId | String | Required | FK User.id; assignee relation; indexed. |
 | assignee | User | Required relation | AssignedTasks relation. |
@@ -274,10 +315,21 @@ Prisma fields are required unless marked nullable or assigned a default. Relatio
 | attachments | TaskAttachment[] | Relation | |
 | completionNotes | String? | Nullable | |
 | completionTimestamp | DateTime? | Nullable | Set by complete endpoint. |
+| markedOverdueAt | DateTime? | Nullable | Set when the scheduled job marks the task OVERDUE; cleared when the deadline changes. |
 | createdAt | DateTime | Required, now() | |
 | updatedAt | DateTime | Required, @updatedAt | |
 
 Indexes: assigneeId and status.
+
+### TaskComment
+
+| Field | Type | Required/default | Notes |
+|---|---|---|---|
+| id | String | Required, uuid() | Primary key. |
+| taskId | String | Required | FK Task.id; indexed. Cascades on task deletion. |
+| authorId | String | Required | FK User.id. |
+| body | String | Required | VARCHAR(1000); stored trimmed. |
+| createdAt | DateTime | Required, now() | |
 
 ### TaskChecklistItem
 

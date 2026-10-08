@@ -28,8 +28,54 @@
 ## Project setup
 
 ```bash
-$ npm install
+npm ci
 ```
+
+## Prisma
+
+```bash
+# Create and apply a migration during development
+npm run migrate:dev
+
+# Apply committed migrations in deployment environments
+npm run migrate:deploy
+
+# Regenerate the Prisma client after schema changes or dependency installation
+npm run prisma:generate
+
+# Open Prisma Studio
+npm run prisma:studio
+```
+
+## Notifications and reminders
+
+Task due-soon and overdue notifications are checked on the schedule configured by
+`REMINDER_CRON` (default: `*/5 * * * *`, every five minutes). Workers get a
+reminder about 24 hours and about 2 hours before a deadline; change these in the
+constants at the top of `src/notifications/reminders.service.ts`. Each reminder
+is sent once per task per deadline (moving the deadline allows new reminders).
+The MySQL `Task` table has an index on `(assigneeId, deadline)` to support
+reminder candidate lookups.
+
+## Fixing Prisma `EPERM` errors on Windows
+
+If `prisma generate` fails with `EPERM` while replacing the Prisma query-engine
+DLL, close project processes and stop the remaining Node.js processes before
+removing Prisma's generated and downloaded binaries. In PowerShell, inspect
+running Node.js processes with `Get-Process node`; stop the project processes
+(or, if safe, all Node.js processes) before continuing:
+
+```powershell
+Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
+Remove-Item -Recurse -Force .\node_modules\.prisma, .\node_modules\@prisma\engines -ErrorAction SilentlyContinue
+$env:PRISMA_CLI_QUERY_ENGINE_TYPE = "library"
+npm ci
+npm run prisma:generate
+```
+
+The `Stop-Process` command stops every Node.js process for the current user, so
+close unrelated Node.js applications first. The environment variable applies
+to the current PowerShell session; open a new session to clear it.
 
 ## Compile and run the project
 

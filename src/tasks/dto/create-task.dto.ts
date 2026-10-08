@@ -3,6 +3,7 @@ import {
   IsArray,
   IsDateString,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
   Min,
@@ -24,10 +25,20 @@ export class CreateTaskDto {
   description?: string;
 
   @IsOptional()
+  @IsString()
+  titleAr?: string;
+
+  @IsOptional()
+  @IsString()
+  descriptionAr?: string;
+
+  @IsOptional()
   priority?: TaskPriority;
 
+  @IsOptional()
   @IsString()
-  assigneeId: string;
+  @IsNotEmpty()
+  assigneeId?: string;
 
   @IsOptional()
   @IsDateString()

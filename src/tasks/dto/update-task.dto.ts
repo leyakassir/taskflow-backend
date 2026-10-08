@@ -4,6 +4,8 @@ import { TaskPriority } from '@prisma/client';
 export class UpdateTaskDto {
   @IsOptional() @IsString() title?: string;
   @IsOptional() @IsString() description?: string;
+  @IsOptional() @IsString() titleAr?: string;
+  @IsOptional() @IsString() descriptionAr?: string;
   @IsOptional() @IsEnum(TaskPriority) priority?: TaskPriority;
   @IsOptional() @IsDateString() deadline?: string;
   @IsOptional() @IsDateString() startDate?: string;
