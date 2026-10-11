@@ -11,6 +11,7 @@ import { TasksModule } from './tasks/tasks.module.js';
 import { UsersModule } from './users/users.module.js';
 import { ContentModule } from './content/content.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
+import { AuditModule } from './audit/audit.module.js';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { NotificationsModule } from './notifications/notifications.module.js';
     TasksModule,
     NotificationsModule,
     ContentModule,
+    AuditModule,
   ],
 })
 export class AppModule {}

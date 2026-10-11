@@ -186,6 +186,18 @@ export class NotificationsService {
     });
   }
 
+  /** To the worker whose open task was deleted (no taskId, the task is gone). */
+  emitTaskDeleted(task: TaskSummary, workerId: string | null, actorId?: string) {
+    return this.notify({
+      userId: workerId,
+      actorId,
+      kind: NotificationKind.GENERIC,
+      title: 'Task removed',
+      body: `"${task.title}" was removed and is no longer on your list.`,
+      dedupeKey: `deleted:${task.id}`,
+    });
+  }
+
   /** Only call when at least one field really changed. */
   emitTaskUpdated(
     task: TaskSummary & Pick<Task, 'assigneeId' | 'updatedAt'>,
@@ -203,17 +215,62 @@ export class NotificationsService {
     });
   }
 
-  /** To the task's creator when the worker submits completion. */
-  emitTaskSubmitted(task: TaskSummary & Pick<Task, 'createdById'>, actorId?: string) {
+  /** To the task's creator when the worker submits. [resubmittedAt] makes each resubmission its own event. */
+  emitTaskSubmitted(
+    task: TaskSummary & Pick<Task, 'createdById'>,
+    actorId?: string,
+    resubmittedAt?: Date | null,
+  ) {
     return this.notify({
       userId: task.createdById,
       actorId,
       kind: NotificationKind.TASK_SUBMITTED,
       taskId: task.id,
-      title: 'Task completed',
-      body: `"${task.title}" was submitted as completed.`,
-      // COMPLETED is final, so this can only happen once per task.
-      dedupeKey: `submitted:${task.id}`,
+      title: resubmittedAt ? 'Task resubmitted' : 'Task completed',
+      body: resubmittedAt
+        ? `"${task.title}" was fixed and submitted again.`
+        : `"${task.title}" was submitted as completed.`,
+      dedupeKey: resubmittedAt
+        ? `submitted:${task.id}:${resubmittedAt.getTime()}`
+        : `submitted:${task.id}`,
+    });
+  }
+
+  /** To the worker: their submission was accepted. */
+  emitTaskApproved(
+    task: TaskSummary & Pick<Task, 'assigneeId' | 'updatedAt'>,
+    note: string | null,
+    actorId?: string,
+  ) {
+    return this.notify({
+      userId: task.assigneeId,
+      actorId,
+      kind: NotificationKind.GENERIC,
+      taskId: task.id,
+      title: 'Task approved',
+      body: note ? `"${task.title}" was approved: ${note}` : `"${task.title}" was approved.`,
+      dedupeKey: `approved:${task.id}:${task.updatedAt.getTime()}`,
+    });
+  }
+
+  /** To the worker who has to redo the task; [toNewWorker] when it went to someone else. */
+  emitTaskSentBack(
+    task: TaskSummary & Pick<Task, 'updatedAt'>,
+    workerId: string | null,
+    note: string | null,
+    actorId?: string,
+    toNewWorker = false,
+  ) {
+    return this.notify({
+      userId: workerId,
+      actorId,
+      kind: toNewWorker ? NotificationKind.TASK_REASSIGNED : NotificationKind.GENERIC,
+      taskId: task.id,
+      title: toNewWorker ? 'Task reassigned to you' : 'Changes requested',
+      body: toNewWorker
+        ? `"${task.title}" was sent to you to redo: ${note}`
+        : `"${task.title}" needs changes: ${note}`,
+      dedupeKey: `sent-back:${task.id}:${task.updatedAt.getTime()}`,
     });
   }
 

@@ -37,7 +37,7 @@ export class MeController {
     @Req() req: AuthenticatedRequest,
     @Body() dto: UpdateSelfDto,
   ) {
-    return this.users.update(req.user.id, { fullName: dto.fullName });
+    return this.users.update(req.user.id, { fullName: dto.fullName }, req.user);
   }
 
   @Patch('password')

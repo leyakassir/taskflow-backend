@@ -24,9 +24,12 @@ model User {
 
   assignedTasks Task[]         @relation("AssignedTasks")
   createdTasks  Task[]         @relation("CreatedTasks")
+  reviewedTasks Task[]         @relation("ReviewedTasks")
   deviceTokens  DeviceToken[]
   notifications Notification[]
   taskComments  TaskComment[]
+  auditActions  AuditLog[]     @relation("AuditActor")
+  auditTargets  AuditLog[]     @relation("AuditTarget")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -95,14 +98,14 @@ enum TaskStatus {
 }
 
 model Task {
-  id          String       @id @default(uuid())
-  title       String
-  description String?
+  id            String       @id @default(uuid())
+  title         String
+  description   String?
   // Optional Arabic versions shown by the app when its language is Arabic.
   titleAr       String?
-  descriptionAr String? @db.Text
-  priority    TaskPriority @default(MEDIUM)
-  status      TaskStatus   @default(ASSIGNED)
+  descriptionAr String?      @db.Text
+  priority      TaskPriority @default(MEDIUM)
+  status        TaskStatus   @default(ASSIGNED)
 
   deadline  DateTime?
   startDate DateTime?
@@ -132,6 +135,15 @@ model Task {
   // re-marking a task the worker restarted (OVERDUE -> IN_PROGRESS); cleared
   // when the deadline changes.
   markedOverdueAt DateTime?
+
+  // Set when the worker submits; null on tasks completed before reviews existed.
+  reviewStatus ReviewStatus?
+  reviewNote   String?       @db.Text
+  reviewedAt   DateTime?
+  reviewedById String?
+  reviewedBy   User?         @relation("ReviewedTasks", fields: [reviewedById], references: [id])
+
+  auditLogs AuditLog[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -184,4 +196,58 @@ model TaskComment {
   createdAt DateTime @default(now())
 
   @@index([taskId])
+}
+
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  CHANGES_REQUESTED
+}
+
+enum AuditAction {
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_REASSIGNED
+  TASK_STARTED
+  TASK_STATUS_CHANGED
+  TASK_CANCELLED
+  TASK_DELETED
+  TASK_SUBMITTED
+  TASK_APPROVED
+  TASK_SENT_BACK
+  CHECKLIST_ITEM_ADDED
+  CHECKLIST_ITEM_RENAMED
+  CHECKLIST_ITEM_REMOVED
+  ATTACHMENT_UPLOADED
+  ATTACHMENT_REMOVED
+  USER_CREATED
+  USER_UPDATED
+  USER_PASSWORD_RESET
+  USER_PASSWORD_CHANGED
+  USER_ACTIVATED
+  USER_DEACTIVATED
+  LEGAL_PAGE_UPDATED
+}
+
+// Who did what. details keeps a snapshot of names/titles.
+model AuditLog {
+  id     String      @id @default(cuid())
+  action AuditAction
+
+  actorId String?
+  actor   User?   @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  taskId String?
+  task   Task?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  targetUserId String?
+  targetUser   User?   @relation("AuditTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([taskId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([targetUserId, createdAt])
 }
