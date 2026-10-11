@@ -144,6 +144,13 @@ export class UsersService {
     return { success: true };
   }
 
+  // Only removes the token if it belongs to the caller, so one user can
+  // never unregister another user's device. Idempotent.
+  async unregisterDeviceToken(userId: string, token: string) {
+    await this.prisma.deviceToken.deleteMany({ where: { token, userId } });
+    return { success: true };
+  }
+
   async changeOwnPassword(id: string, dto: ChangePasswordSelfDto) {
     const u = await this.prisma.user.findUnique({ where: { id } });
     if (!u) throw new NotFoundException('User not found');

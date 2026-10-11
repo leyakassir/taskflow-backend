@@ -193,6 +193,7 @@ All routes use JwtAuthGuard and operate on req.user.id.
 | PATCH /me/password | { currentPassword: string, newPassword: string }; both required, each min 8. | { success: true }; wrong current password is 400. |
 | POST /me/avatar | multipart/form-data with one file field named file. MIME allowlist jpeg/png/webp/gif/heic/heif; max 10 MiB. | { avatarUrl: string }, value is /uploads/avatars/<generated-name>. See §8. |
 | POST /me/device-token | { token: string }, required nonempty string. JWT required. | { success: true }; upserts by unique token and reassigns an existing token to the current user. |
+| DELETE /me/device-token | UnregisterDeviceTokenDto: { token: string }, required nonempty string. JWT required. | { success: true }; removes the token only if it belongs to the caller (no-op otherwise). The mobile app calls it on logout so the device stops receiving that user's pushes. |
 
 ### Tasks controller (/tasks)
 

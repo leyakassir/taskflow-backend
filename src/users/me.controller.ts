@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Patch,
   Post,
@@ -21,6 +22,7 @@ import { UsersService } from './users.service.js';
 import { UpdateSelfDto } from './dto/update-self.dto.js';
 import { ChangePasswordSelfDto } from './dto/change-password-self.dto.js';
 import { RegisterDeviceTokenDto } from './dto/register-device-token.dto.js';
+import { UnregisterDeviceTokenDto } from './dto/unregister-device-token.dto.js';
 
 @UseGuards(JwtAuthGuard)
 @Controller('me')
@@ -54,6 +56,16 @@ export class MeController {
     @Body() dto: RegisterDeviceTokenDto,
   ) {
     return this.users.registerDeviceToken(req.user.id, dto.token);
+  }
+
+  // Called by the app on logout so the device stops receiving this user's
+  // push notifications.
+  @Delete('device-token')
+  async unregisterDeviceToken(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: UnregisterDeviceTokenDto,
+  ) {
+    return this.users.unregisterDeviceToken(req.user.id, dto.token);
   }
 
   @Post('avatar')
