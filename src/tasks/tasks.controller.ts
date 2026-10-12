@@ -29,11 +29,13 @@ import { ListTasksQueryDto } from './dto/list-tasks-query.dto.js';
 import { ReviewTaskDto } from './dto/review-task.dto.js';
 
 import { JwtAuthGuard } from '../auth/jwt.guard.js';
+import { TaskChangesInterceptor } from '../realtime/task-changes.interceptor.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { RolesGuard } from '../common/guards/roles.guard.js';
 import type { AuthenticatedRequest } from '../common/interfaces/authenticated-request.interface.js';
 
 @UseGuards(JwtAuthGuard)
+@UseInterceptors(TaskChangesInterceptor)
 @Controller('tasks')
 export class TasksController {
   constructor(private readonly tasksService: TasksService) {}

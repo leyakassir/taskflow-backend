@@ -71,7 +71,7 @@ There is no .env.example in the backend directory. These names are from .env; th
 | PORT | HTTP listen port; defaults to 3000 if unset. | Usually set as needed; align API client and CORS URLs. |
 | DATABASE_URL | Prisma MySQL connection URL. | **Yes.** Set the developer's database host, port, credentials, and database name. |
 | JWT_SECRET | Secret used to sign and verify access tokens. App startup throws if absent. | **Yes.** Generate a private local secret; never share or commit it. |
-| JWT_EXPIRES_IN_SECONDS | Access-token lifetime in seconds; source defaults to 900 if absent. Current .env configures 900 seconds (15 minutes). | Usually choose the intended local lifetime. |
+| JWT_EXPIRES_IN_SECONDS | Access-token lifetime in seconds; source defaults to 900 if absent. Current .env configures 31536000 seconds (1 year), so mobile workers stay signed in; deactivating a user still blocks them immediately because JwtAuthGuard re-checks isActive on every request. | Usually choose the intended local lifetime. |
 | CORS_ORIGINS | Comma-separated browser-origin allowlist. If empty, main.ts uses its fallback list in §10. | **Yes for the dashboard.** Add the dashboard origin including scheme and port. |
 | FIREBASE_SERVICE_ACCOUNT_PATH | Path to the Firebase Admin service-account JSON file. Used only for push notifications. | Optional locally; configure with a private credential file to enable push. |
 | FIREBASE_SERVICE_ACCOUNT_JSON | Firebase Admin service-account JSON string; alternative to the path above. | Optional locally; keep the value private and never commit it. |
@@ -262,6 +262,7 @@ ConfigController and LegalController have no auth guards.
 
 | Method/path | Request | Response / validation |
 |---|---|---|
+| GET /events | JWT required (Authorization: Bearer). No body. Server-Sent Events (text/event-stream). | Live change notices for the signed-in user: `data: {"type":"task"|"comment"|"notification","taskId"?}`; `{"type":"ping"}` every 25 s. Task/comment events go to the task's previous and new assignee and to all ADMIN/MANAGER users; notification events to the recipient. Events carry only ids: reload through the normal endpoints. Sent after every successful POST/PATCH/DELETE on /tasks and /tasks/:id/comments, and when the reminder job marks a task OVERDUE. Browsers: EventSource cannot send the Authorization header, so read it with fetch() and a stream reader. Single backend instance only (in-process bus). |
 | GET /config/locales | No body. | { defaultLocale: "en", supportedLocales: ["en","ar"], legal: { termsUrlTemplate, privacyUrlTemplate, aboutUrlTemplate, howToUrlTemplate } }. Templates point to /public/legal/{lang}/<slug>.html. |
 | GET /legal/page?slug=<slug>&lang=<lang> | Required slug exact values terms, privacy, about, how-to; lang optional/default en. | HTML from public/legal/<lang>/<slug>.html; unsupported locale falls back to en. Missing/invalid slug is 400. If requested and English files are missing, 404 JSON { message, slug, lang }. |
 

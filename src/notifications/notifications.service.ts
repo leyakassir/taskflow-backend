@@ -2,6 +2,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, type Notification, NotificationKind, type Task, TaskStatus } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service.js';
 import { PushNotificationsService } from './push-notifications.service.js';
+import { RealtimeService } from '../realtime/realtime.service.js';
 
 export type NotifyInput = {
   /** Recipient. Nothing is sent when absent. */
@@ -57,6 +58,7 @@ export class NotificationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly pushNotifications: PushNotificationsService,
+    private readonly realtime: RealtimeService,
   ) {}
 
   /**
@@ -92,6 +94,8 @@ export class NotificationsService {
         },
         omit: { dedupeKey: true },
       });
+      // Open apps refresh the bell and list right away (no push needed).
+      this.realtime.publish({ type: 'notification', taskId: input.taskId ?? undefined }, [userId]);
 
       await this.pushNotifications.sendToUser(userId, {
         title: notification.title,

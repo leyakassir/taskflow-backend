@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiCreatedResponse,
@@ -10,6 +20,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt.guard.js';
+import { TaskChangesInterceptor } from '../realtime/task-changes.interceptor.js';
 import type { AuthenticatedRequest } from '../common/interfaces/authenticated-request.interface.js';
 import { CreateTaskCommentDto } from './dto/create-task-comment.dto.js';
 import { ListTaskCommentsQueryDto } from './dto/list-task-comments-query.dto.js';
@@ -19,6 +30,7 @@ import { TaskCommentsService } from './task-comments.service.js';
 @ApiTags('task comments')
 @ApiBearerAuth('access-token')
 @UseGuards(JwtAuthGuard)
+@UseInterceptors(TaskChangesInterceptor)
 @Controller('tasks/:id/comments')
 export class TaskCommentsController {
   constructor(private readonly comments: TaskCommentsService) {}
