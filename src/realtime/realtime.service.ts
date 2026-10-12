@@ -3,7 +3,7 @@ import { UserRole } from '@prisma/client';
 import { Observable, Subject, filter, map } from 'rxjs';
 
 /** What changed. Clients refetch the matching data; no data is sent. */
-export type RealtimeEventType = 'task' | 'comment' | 'notification';
+export type RealtimeEventType = 'task' | 'comment' | 'notification' | 'signup';
 
 export interface RealtimeEvent {
   type: RealtimeEventType;

@@ -26,18 +26,52 @@ model User {
   // before it are rejected, so a reset signs out every other device.
   passwordChangedAt DateTime?
 
-  assignedTasks Task[]         @relation("AssignedTasks")
-  createdTasks  Task[]         @relation("CreatedTasks")
-  reviewedTasks Task[]         @relation("ReviewedTasks")
-  deviceTokens  DeviceToken[]
-  passwordResetCodes PasswordResetCode[]
-  notifications Notification[]
-  taskComments  TaskComment[]
-  auditActions  AuditLog[]     @relation("AuditActor")
-  auditTargets  AuditLog[]     @relation("AuditTarget")
+  assignedTasks          Task[]              @relation("AssignedTasks")
+  createdTasks           Task[]              @relation("CreatedTasks")
+  reviewedTasks          Task[]              @relation("ReviewedTasks")
+  deviceTokens           DeviceToken[]
+  passwordResetCodes     PasswordResetCode[]
+  reviewedSignupRequests SignupRequest[]     @relation("SignupReviewer")
+  notifications          Notification[]
+  taskComments           TaskComment[]
+  auditActions           AuditLog[]          @relation("AuditActor")
+  auditTargets           AuditLog[]          @relation("AuditTarget")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+enum SignupRequestStatus {
+  /// Waiting for the emailed code; admins don't see these.
+  UNVERIFIED
+  /// Email verified; waiting for an admin.
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// "Request an account" from the app. The email is verified with a code
+/// before admins see it; approving creates the user with this password.
+model SignupRequest {
+  id              String              @id @default(cuid())
+  email           String
+  fullName        String
+  passwordHash    String
+  lang            String              @default("en")
+  status          SignupRequestStatus @default(UNVERIFIED)
+  codeHash        String?
+  codeExpiresAt   DateTime?
+  attempts        Int                 @default(0)
+  verifiedAt      DateTime?
+  reviewedById    String?
+  reviewedBy      User?               @relation("SignupReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt      DateTime?
+  rejectionReason String?             @db.VarChar(300)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([email, createdAt])
+  @@index([status, createdAt])
 }
 
 /// One-time code emailed for "Forgot password". Only a hash is stored.
@@ -75,6 +109,7 @@ enum NotificationKind {
   TASK_SUBMITTED
   TASK_COMMENT
   DAILY_SUMMARY
+  SIGNUP_REQUEST
   GENERIC
 }
 
