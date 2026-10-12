@@ -5,6 +5,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
 import { JwtAuthGuard } from './jwt.guard.js';
+import { PasswordResetService } from './password-reset.service.js';
 
 @Global()
 @Module({
@@ -32,7 +33,7 @@ import { JwtAuthGuard } from './jwt.guard.js';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtAuthGuard],
+  providers: [AuthService, JwtAuthGuard, PasswordResetService],
   exports: [JwtModule, JwtAuthGuard],
 })
 export class AuthModule {}

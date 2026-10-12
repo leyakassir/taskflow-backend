@@ -13,6 +13,7 @@ import { ContentModule } from './content/content.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { AuditModule } from './audit/audit.module.js';
 import { RealtimeModule } from './realtime/realtime.module.js';
+import { MailModule } from './mail/mail.module.js';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { RealtimeModule } from './realtime/realtime.module.js';
     ),
     PrismaModule,
     RealtimeModule,
+    MailModule,
     AuthModule,
     UsersModule,
     TasksModule,

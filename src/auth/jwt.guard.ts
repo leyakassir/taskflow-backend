@@ -40,10 +40,19 @@ export class JwtAuthGuard implements CanActivate {
     // Ensure the user still exists and is active
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
-      select: { id: true, role: true, isActive: true },
+      select: { id: true, role: true, isActive: true, passwordChangedAt: true },
     });
     if (!user || !user.isActive) {
       throw new UnauthorizedException('User not found or inactive');
+    }
+    // A password reset signs out every session issued before it.
+    // (iat is in whole seconds, so compare at that precision.)
+    if (
+      user.passwordChangedAt &&
+      payload.iat !== undefined &&
+      payload.iat < Math.floor(user.passwordChangedAt.getTime() / 1000)
+    ) {
+      throw new UnauthorizedException('Session ended: password was reset');
     }
 
     // Attach to request for RolesGuard and services

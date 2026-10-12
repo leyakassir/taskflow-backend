@@ -22,10 +22,15 @@ model User {
   isActive     Boolean  @default(true)
   avatarUrl    String?
 
+  // Set when the password is reset with an emailed code. Sessions issued
+  // before it are rejected, so a reset signs out every other device.
+  passwordChangedAt DateTime?
+
   assignedTasks Task[]         @relation("AssignedTasks")
   createdTasks  Task[]         @relation("CreatedTasks")
   reviewedTasks Task[]         @relation("ReviewedTasks")
   deviceTokens  DeviceToken[]
+  passwordResetCodes PasswordResetCode[]
   notifications Notification[]
   taskComments  TaskComment[]
   auditActions  AuditLog[]     @relation("AuditActor")
@@ -33,6 +38,20 @@ model User {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+/// One-time code emailed for "Forgot password". Only a hash is stored.
+model PasswordResetCode {
+  id        String    @id @default(cuid())
+  userId    String
+  codeHash  String
+  expiresAt DateTime
+  attempts  Int       @default(0)
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
 }
 
 model DeviceToken {
