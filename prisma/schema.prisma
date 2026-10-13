@@ -26,6 +26,10 @@ model User {
   // before it are rejected, so a reset signs out every other device.
   passwordChangedAt DateTime?
 
+  // Optional company-specific role (e.g. "IT support"); role above mirrors its access level.
+  jobRoleId String?
+  jobRole   JobRole? @relation(fields: [jobRoleId], references: [id], onDelete: SetNull)
+
   assignedTasks          Task[]              @relation("AssignedTasks")
   createdTasks           Task[]              @relation("CreatedTasks")
   reviewedTasks          Task[]              @relation("ReviewedTasks")
@@ -86,6 +90,18 @@ model PasswordResetCode {
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+// A company's own name for a kind of account. Its access level is what the
+// built-in roles mean (ADMIN/MANAGER use the dashboard, WORKER gets tasks).
+model JobRole {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  nameAr    String?
+  access    UserRole @default(WORKER)
+  users     User[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model DeviceToken {
@@ -281,6 +297,9 @@ enum AuditAction {
   USER_ACTIVATED
   USER_DEACTIVATED
   LEGAL_PAGE_UPDATED
+  ROLE_CREATED
+  ROLE_UPDATED
+  ROLE_DELETED
 }
 
 // Who did what. details keeps a snapshot of names/titles.
