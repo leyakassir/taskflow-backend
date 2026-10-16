@@ -4,6 +4,7 @@ import { AuthService } from './auth.service.js';
 import { LoginDto } from './dto/login.dto.js';
 import { ForgotPasswordDto } from './dto/forgot-password.dto.js';
 import { ResetPasswordDto } from './dto/reset-password.dto.js';
+import { VerifyResetCodeDto } from './dto/verify-reset-code.dto.js';
 import { PasswordResetService } from './password-reset.service.js';
 import { JwtAuthGuard } from './jwt.guard.js';
 import type { AuthenticatedRequest } from '../common/interfaces/authenticated-request.interface.js';
@@ -32,6 +33,16 @@ export class AuthController {
   @HttpCode(200)
   async forgotPassword(@Body() dto: ForgotPasswordDto) {
     await this.passwordReset.requestCode(dto.email, dto.lang);
+    return { success: true };
+  }
+
+  /** Checks the emailed code without using it up, so a client can confirm it before asking for the new password. */
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('verify-reset-code')
+  @HttpCode(200)
+  async verifyResetCode(@Body() dto: VerifyResetCodeDto) {
+    await this.passwordReset.verifyCode(dto.email, dto.code);
     return { success: true };
   }
 
