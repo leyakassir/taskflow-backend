@@ -15,6 +15,7 @@ import { AuditModule } from './audit/audit.module.js';
 import { RealtimeModule } from './realtime/realtime.module.js';
 import { MailModule } from './mail/mail.module.js';
 import { SignupModule } from './signup/signup.module.js';
+import { JobRolesModule } from './job-roles/job-roles.module.js';
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { SignupModule } from './signup/signup.module.js';
     ContentModule,
     AuditModule,
     SignupModule,
+    JobRolesModule,
   ],
 })
 export class AppModule {}

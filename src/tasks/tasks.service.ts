@@ -150,6 +150,10 @@ export class TasksService {
     // A new deadline may become overdue again later.
     const deadlineChanged =
       !!dto.deadline && new Date(dto.deadline).getTime() !== task.deadline?.getTime();
+    // A late task moved to a future deadline is no longer late.
+    const backOnTime =
+      deadlineChanged && task.status === TaskStatus.OVERDUE && new Date(dto.deadline!).getTime() > Date.now();
+    const resumeStatus = backOnTime ? await this.statusBeforeOverdue(taskId) : undefined;
 
     const updated = await this.prisma.$transaction(async (tx) => {
       const next = await tx.task.update({
@@ -167,10 +171,11 @@ export class TasksService {
           minFilesRequired: typeof dto.minFilesRequired === 'number' ? dto.minFilesRequired : undefined,
           requiresChecklist: typeof dto.requiresChecklist === 'boolean' ? dto.requiresChecklist : undefined,
           markedOverdueAt: deadlineChanged ? null : undefined,
+          status: resumeStatus,
         },
         include: { checklistItems: true, attachments: true },
       });
-      const changes = diffFields(task, next, [...TRACKED_TASK_FIELDS]);
+      const changes = diffFields(task, next, [...TRACKED_TASK_FIELDS, 'status']);
       if (Object.keys(changes).length > 0) {
         await this.audit.record(
           {
@@ -194,6 +199,40 @@ export class TasksService {
       await this.notifications.emitTaskUpdated(updated, changed, actor.id);
     }
     return updated;
+  }
+
+  /**
+   * The reminder job marks late tasks OVERDUE without noting what they were, so
+   * the audit log tells whether the worker had started (IN_PROGRESS) or not.
+   */
+  private async statusBeforeOverdue(taskId: string): Promise<TaskStatus> {
+    const last = await this.prisma.auditLog.findFirst({
+      where: {
+        taskId,
+        action: {
+          in: [
+            AuditAction.TASK_CREATED,
+            AuditAction.TASK_STARTED,
+            AuditAction.TASK_STATUS_CHANGED,
+            AuditAction.TASK_SENT_BACK,
+          ],
+        },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { action: true, details: true },
+    });
+    const details = (last?.details ?? {}) as { to?: string; toUserId?: string };
+    switch (last?.action) {
+      case AuditAction.TASK_STARTED:
+        return TaskStatus.IN_PROGRESS;
+      case AuditAction.TASK_STATUS_CHANGED:
+        return details.to === TaskStatus.IN_PROGRESS ? TaskStatus.IN_PROGRESS : TaskStatus.ASSIGNED;
+      case AuditAction.TASK_SENT_BACK:
+        // Back to the same worker resumes the work; a new worker starts over.
+        return details.toUserId ? TaskStatus.ASSIGNED : TaskStatus.IN_PROGRESS;
+      default:
+        return TaskStatus.ASSIGNED;
+    }
   }
 
   async assignTask(taskId: string, assigneeId: string, actor: RequestUser) {

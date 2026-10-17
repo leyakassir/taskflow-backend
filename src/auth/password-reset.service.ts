@@ -99,7 +99,36 @@ export class PasswordResetService {
     }
   }
 
+  /**
+   * Lets a client confirm the code before asking for the new password. The
+   * code stays valid for resetPassword, and wrong guesses here count towards
+   * the same attempt limit.
+   */
+  async verifyCode(email: string, code: string): Promise<void> {
+    await this.checkCode(email, code);
+  }
+
   async resetPassword(email: string, code: string, newPassword: string): Promise<void> {
+    const userId = await this.checkCode(email, code);
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: userId },
+        // Sessions issued before now stop working (see JwtAuthGuard).
+        data: { passwordHash, passwordChangedAt: new Date() },
+      }),
+      this.prisma.passwordResetCode.deleteMany({ where: { userId } }),
+      // Mobile sessions end too: their refresh tokens stop working.
+      this.prisma.refreshToken.updateMany({
+        where: { userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+  }
+
+  /** Returns the user's id when the code is right; otherwise the same 400 every time. */
+  private async checkCode(email: string, code: string): Promise<string> {
     const user = await this.prisma.user.findUnique({
       where: { email: email.trim().toLowerCase() },
       select: { id: true, isActive: true },
@@ -125,20 +154,6 @@ export class PasswordResetService {
       });
       throw new BadRequestException(INVALID_CODE);
     }
-
-    const passwordHash = await bcrypt.hash(newPassword, 10);
-    await this.prisma.$transaction([
-      this.prisma.user.update({
-        where: { id: user.id },
-        // Sessions issued before now stop working (see JwtAuthGuard).
-        data: { passwordHash, passwordChangedAt: new Date() },
-      }),
-      this.prisma.passwordResetCode.deleteMany({ where: { userId: user.id } }),
-      // Mobile sessions end too: their refresh tokens stop working.
-      this.prisma.refreshToken.updateMany({
-        where: { userId: user.id, revokedAt: null },
-        data: { revokedAt: new Date() },
-      }),
-    ]);
+    return user.id;
   }
 }
