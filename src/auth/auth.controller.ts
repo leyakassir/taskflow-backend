@@ -4,6 +4,8 @@ import { AuthService } from './auth.service.js';
 import { LoginDto } from './dto/login.dto.js';
 import { ForgotPasswordDto } from './dto/forgot-password.dto.js';
 import { ResetPasswordDto } from './dto/reset-password.dto.js';
+import { RefreshTokenDto } from './dto/refresh-token.dto.js';
+import { RefreshTokenService } from './refresh-token.service.js';
 import { PasswordResetService } from './password-reset.service.js';
 import { JwtAuthGuard } from './jwt.guard.js';
 import type { AuthenticatedRequest } from '../common/interfaces/authenticated-request.interface.js';
@@ -13,13 +15,36 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly passwordReset: PasswordResetService,
+    private readonly refreshTokens: RefreshTokenService,
   ) {}
 
   @UseGuards(ThrottlerGuard)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post('login')
   login(@Body() dto: LoginDto) {
-    return this.authService.login(dto.email, dto.password);
+    return this.authService.login(dto.email, dto.password, dto.client);
+  }
+
+  /**
+   * Mobile: trades a refresh token for a new access token and a new refresh
+   * token. The old refresh token stops working.
+   */
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Post('refresh')
+  @HttpCode(200)
+  refresh(@Body() dto: RefreshTokenDto) {
+    return this.refreshTokens.refresh(dto.refreshToken);
+  }
+
+  /** Mobile logout: the refresh token stops working. */
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Post('logout')
+  @HttpCode(200)
+  async logout(@Body() dto: RefreshTokenDto) {
+    await this.refreshTokens.revokeToken(dto.refreshToken);
+    return { success: true };
   }
 
   /**

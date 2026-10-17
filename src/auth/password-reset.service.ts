@@ -134,6 +134,11 @@ export class PasswordResetService {
         data: { passwordHash, passwordChangedAt: new Date() },
       }),
       this.prisma.passwordResetCode.deleteMany({ where: { userId: user.id } }),
+      // Mobile sessions end too: their refresh tokens stop working.
+      this.prisma.refreshToken.updateMany({
+        where: { userId: user.id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
     ]);
   }
 }

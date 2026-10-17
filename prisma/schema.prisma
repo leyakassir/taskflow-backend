@@ -31,6 +31,7 @@ model User {
   reviewedTasks          Task[]              @relation("ReviewedTasks")
   deviceTokens           DeviceToken[]
   passwordResetCodes     PasswordResetCode[]
+  refreshTokens          RefreshToken[]
   reviewedSignupRequests SignupRequest[]     @relation("SignupReviewer")
   notifications          Notification[]
   taskComments           TaskComment[]
@@ -86,6 +87,22 @@ model PasswordResetCode {
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+/// Long-lived token the mobile app trades for a new 15-minute access
+/// token (POST /auth/refresh). Only a SHA-256 hash is stored. Each use
+/// replaces it with a new one; reusing a replaced token ends every session
+/// of that user, since it means the token was copied.
+model RefreshToken {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model DeviceToken {
