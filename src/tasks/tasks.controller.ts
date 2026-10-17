@@ -26,13 +26,16 @@ import { AssignTaskDto } from './dto/assign-task.dto.js';
 import { CreateChecklistItemDto } from './dto/create-checklist-item.dto.js';
 import { UpdateChecklistItemDto } from './dto/update-checklist-item.dto.js';
 import { ListTasksQueryDto } from './dto/list-tasks-query.dto.js';
+import { ReviewTaskDto } from './dto/review-task.dto.js';
 
 import { JwtAuthGuard } from '../auth/jwt.guard.js';
+import { TaskChangesInterceptor } from '../realtime/task-changes.interceptor.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { RolesGuard } from '../common/guards/roles.guard.js';
 import type { AuthenticatedRequest } from '../common/interfaces/authenticated-request.interface.js';
 
 @UseGuards(JwtAuthGuard)
+@UseInterceptors(TaskChangesInterceptor)
 @Controller('tasks')
 export class TasksController {
   constructor(private readonly tasksService: TasksService) {}
@@ -48,6 +51,13 @@ export class TasksController {
   @Patch(':id')
   update(@Param('id') id: string, @Body() dto: UpdateTaskDto, @Req() req: AuthenticatedRequest) {
     return this.tasksService.updateTask(id, dto, req.user);
+  }
+
+  // Delete (admin/manager)
+  @UseGuards(RolesGuard) @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @Delete(':id')
+  remove(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
+    return this.tasksService.deleteTask(id, req.user);
   }
 
   // List and read (scoped)
@@ -83,6 +93,13 @@ export class TasksController {
     return this.tasksService.complete(id, dto, req.user);
   }
 
+  // Review a submission (admin/manager): approve, or send back with a note
+  @UseGuards(RolesGuard) @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @Patch(':id/review')
+  review(@Param('id') id: string, @Body() dto: ReviewTaskDto, @Req() req: AuthenticatedRequest) {
+    return this.tasksService.review(id, dto, req.user);
+  }
+
   // Assign / Reassign (admin/manager)
   @UseGuards(RolesGuard) @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Patch(':id/assign')
@@ -93,8 +110,12 @@ export class TasksController {
   // Checklist CRUD (admin/manager)
   @UseGuards(RolesGuard) @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Post(':id/checklist')
-  addChecklistItem(@Param('id') id: string, @Body() dto: CreateChecklistItemDto) {
-    return this.tasksService.addChecklistItem(id, dto);
+  addChecklistItem(
+    @Param('id') id: string,
+    @Body() dto: CreateChecklistItemDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.tasksService.addChecklistItem(id, dto, req.user);
   }
 
   @UseGuards(RolesGuard) @Roles(UserRole.ADMIN, UserRole.MANAGER)
@@ -103,14 +124,19 @@ export class TasksController {
     @Param('id') id: string,
     @Param('itemId') itemId: string,
     @Body() dto: UpdateChecklistItemDto,
+    @Req() req: AuthenticatedRequest,
   ) {
-    return this.tasksService.updateChecklistItem(id, itemId, dto);
+    return this.tasksService.updateChecklistItem(id, itemId, dto, req.user);
   }
 
   @UseGuards(RolesGuard) @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Delete(':id/checklist/:itemId')
-  deleteChecklistItem(@Param('id') id: string, @Param('itemId') itemId: string) {
-    return this.tasksService.deleteChecklistItem(id, itemId);
+  deleteChecklistItem(
+    @Param('id') id: string,
+    @Param('itemId') itemId: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.tasksService.deleteChecklistItem(id, itemId, req.user);
   }
 
   // Attachments
@@ -121,8 +147,12 @@ export class TasksController {
 
   @UseGuards(RolesGuard) @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @Delete(':id/attachments/:attId')
-  deleteAttachment(@Param('id') id: string, @Param('attId') attId: string) {
-    return this.tasksService.deleteAttachment(id, attId);
+  deleteAttachment(
+    @Param('id') id: string,
+    @Param('attId') attId: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.tasksService.deleteAttachment(id, attId, req.user);
   }
 
   @Post(':id/attachments')

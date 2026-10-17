@@ -22,12 +22,101 @@ model User {
   isActive     Boolean  @default(true)
   avatarUrl    String?
 
-  assignedTasks Task[]         @relation("AssignedTasks")
-  createdTasks  Task[]         @relation("CreatedTasks")
-  deviceTokens  DeviceToken[]
-  notifications Notification[]
-  taskComments  TaskComment[]
+  // Set when the password is reset with an emailed code. Sessions issued
+  // before it are rejected, so a reset signs out every other device.
+  passwordChangedAt DateTime?
 
+  // Optional company-specific role (e.g. "IT support"); role above mirrors its access level.
+  jobRoleId String?
+  jobRole   JobRole? @relation(fields: [jobRoleId], references: [id], onDelete: SetNull)
+
+  assignedTasks          Task[]              @relation("AssignedTasks")
+  createdTasks           Task[]              @relation("CreatedTasks")
+  reviewedTasks          Task[]              @relation("ReviewedTasks")
+  deviceTokens           DeviceToken[]
+  passwordResetCodes     PasswordResetCode[]
+  refreshTokens          RefreshToken[]
+  reviewedSignupRequests SignupRequest[]     @relation("SignupReviewer")
+  notifications          Notification[]
+  taskComments           TaskComment[]
+  auditActions           AuditLog[]          @relation("AuditActor")
+  auditTargets           AuditLog[]          @relation("AuditTarget")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum SignupRequestStatus {
+  /// Waiting for the emailed code; admins don't see these.
+  UNVERIFIED
+  /// Email verified; waiting for an admin.
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// "Request an account" from the app. The email is verified with a code
+/// before admins see it; approving creates the user with this password.
+model SignupRequest {
+  id              String              @id @default(cuid())
+  email           String
+  fullName        String
+  passwordHash    String
+  lang            String              @default("en")
+  status          SignupRequestStatus @default(UNVERIFIED)
+  codeHash        String?
+  codeExpiresAt   DateTime?
+  attempts        Int                 @default(0)
+  verifiedAt      DateTime?
+  reviewedById    String?
+  reviewedBy      User?               @relation("SignupReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt      DateTime?
+  rejectionReason String?             @db.VarChar(300)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([email, createdAt])
+  @@index([status, createdAt])
+}
+
+/// One-time code emailed for "Forgot password". Only a hash is stored.
+model PasswordResetCode {
+  id        String    @id @default(cuid())
+  userId    String
+  codeHash  String
+  expiresAt DateTime
+  attempts  Int       @default(0)
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+/// Long-lived token the mobile app trades for a new 15-minute access
+/// token (POST /auth/refresh). Only a SHA-256 hash is stored. Each use
+/// replaces it with a new one; reusing a replaced token ends every session
+/// of that user, since it means the token was copied.
+model RefreshToken {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// A company's own name for a kind of account. Its access level is what the
+// built-in roles mean (ADMIN/MANAGER use the dashboard, WORKER gets tasks).
+model JobRole {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  nameAr    String?
+  access    UserRole @default(WORKER)
+  users     User[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -53,6 +142,7 @@ enum NotificationKind {
   TASK_SUBMITTED
   TASK_COMMENT
   DAILY_SUMMARY
+  SIGNUP_REQUEST
   GENERIC
 }
 
@@ -95,14 +185,14 @@ enum TaskStatus {
 }
 
 model Task {
-  id          String       @id @default(uuid())
-  title       String
-  description String?
+  id            String       @id @default(uuid())
+  title         String
+  description   String?
   // Optional Arabic versions shown by the app when its language is Arabic.
   titleAr       String?
-  descriptionAr String? @db.Text
-  priority    TaskPriority @default(MEDIUM)
-  status      TaskStatus   @default(ASSIGNED)
+  descriptionAr String?      @db.Text
+  priority      TaskPriority @default(MEDIUM)
+  status        TaskStatus   @default(ASSIGNED)
 
   deadline  DateTime?
   startDate DateTime?
@@ -132,6 +222,15 @@ model Task {
   // re-marking a task the worker restarted (OVERDUE -> IN_PROGRESS); cleared
   // when the deadline changes.
   markedOverdueAt DateTime?
+
+  // Set when the worker submits; null on tasks completed before reviews existed.
+  reviewStatus ReviewStatus?
+  reviewNote   String?       @db.Text
+  reviewedAt   DateTime?
+  reviewedById String?
+  reviewedBy   User?         @relation("ReviewedTasks", fields: [reviewedById], references: [id])
+
+  auditLogs AuditLog[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -184,4 +283,61 @@ model TaskComment {
   createdAt DateTime @default(now())
 
   @@index([taskId])
+}
+
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  CHANGES_REQUESTED
+}
+
+enum AuditAction {
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_REASSIGNED
+  TASK_STARTED
+  TASK_STATUS_CHANGED
+  TASK_CANCELLED
+  TASK_DELETED
+  TASK_SUBMITTED
+  TASK_APPROVED
+  TASK_SENT_BACK
+  CHECKLIST_ITEM_ADDED
+  CHECKLIST_ITEM_RENAMED
+  CHECKLIST_ITEM_REMOVED
+  ATTACHMENT_UPLOADED
+  ATTACHMENT_REMOVED
+  USER_CREATED
+  USER_UPDATED
+  USER_PASSWORD_RESET
+  USER_PASSWORD_CHANGED
+  USER_ACTIVATED
+  USER_DEACTIVATED
+  LEGAL_PAGE_UPDATED
+  ROLE_CREATED
+  ROLE_UPDATED
+  ROLE_DELETED
+}
+
+// Who did what. details keeps a snapshot of names/titles.
+model AuditLog {
+  id     String      @id @default(cuid())
+  action AuditAction
+
+  actorId String?
+  actor   User?   @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  taskId String?
+  task   Task?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  targetUserId String?
+  targetUser   User?   @relation("AuditTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([taskId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([targetUserId, createdAt])
 }

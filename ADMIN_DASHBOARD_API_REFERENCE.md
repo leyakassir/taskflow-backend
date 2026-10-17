@@ -71,8 +71,9 @@ There is no .env.example in the backend directory. These names are from .env; th
 | PORT | HTTP listen port; defaults to 3000 if unset. | Usually set as needed; align API client and CORS URLs. |
 | DATABASE_URL | Prisma MySQL connection URL. | **Yes.** Set the developer's database host, port, credentials, and database name. |
 | JWT_SECRET | Secret used to sign and verify access tokens. App startup throws if absent. | **Yes.** Generate a private local secret; never share or commit it. |
-| JWT_EXPIRES_IN_SECONDS | Access-token lifetime in seconds; source defaults to 900 if absent. Current .env configures 900 seconds (15 minutes). | Usually choose the intended local lifetime. |
+| JWT_EXPIRES_IN_SECONDS | Access-token lifetime in seconds; source defaults to 900 if absent. Current .env configures 31536000 seconds (1 year), so mobile workers stay signed in; deactivating a user still blocks them immediately because JwtAuthGuard re-checks isActive on every request. | Usually choose the intended local lifetime. |
 | CORS_ORIGINS | Comma-separated browser-origin allowlist. If empty, main.ts uses its fallback list in §10. | **Yes for the dashboard.** Add the dashboard origin including scheme and port. |
+| SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / SMTP_SECURE / MAIL_FROM | Outgoing mail for password-reset codes (nodemailer). SMTP_SECURE=true for port 465; MAIL_FROM e.g. "TaskFlow <no-reply@yourcompany.com>". | Required in production. When SMTP_HOST is empty the code is only logged. |
 | FIREBASE_SERVICE_ACCOUNT_PATH | Path to the Firebase Admin service-account JSON file. Used only for push notifications. | Optional locally; configure with a private credential file to enable push. |
 | FIREBASE_SERVICE_ACCOUNT_JSON | Firebase Admin service-account JSON string; alternative to the path above. | Optional locally; keep the value private and never commit it. |
 
@@ -167,6 +168,13 @@ Task + relations means all Task scalar fields plus checklistItems and attachment
 |---|---|---|---|
 | GET / | None | No body. | String "Hello World!". This starter root handler is not a health/readiness contract. |
 | POST /auth/login | ThrottlerGuard | { email: string, password: string }; email valid, password min 6. | { accessToken: string, user: { id, email, fullName, role } }; 401 for invalid credentials. |
+| POST /auth/forgot-password | ForgotPasswordDto: { email: string (email), lang?: "en"|"ar" }. No auth. Throttled 3/min. | 200 { success: true } always, whether or not the email has an account. For an active account, emails a 6-digit code valid 10 minutes (only a SHA-256 hash is stored); a new request within 60 s is ignored; each new code replaces the previous one. Without SMTP_HOST the email is written to the backend log (development only). |
+| POST /auth/reset-password | ResetPasswordDto: { email, code: 6 digits, newPassword: string (min 8) }. No auth. Throttled 10/min. | 200 { success: true }. 400 "Invalid or expired code" for a wrong, expired, used or locked code (5 wrong tries lock it). Sets User.passwordChangedAt: every session issued before it is rejected by JwtAuthGuard (401 "Session ended: password was reset"). |
+| POST /signup-requests | CreateSignupRequestDto: { fullName (2-100), email, password (min 8), lang?: "en"|"ar" }. No auth. Throttled 3/min. | 200 { success: true } always. Emails a 6-digit code (10 min) for a new request (status UNVERIFIED, hidden from admins). If the email already has an account, or a request already waits for review, that person gets an explanatory email instead. Repeat within 60 s is ignored. |
+| POST /signup-requests/verify | VerifySignupRequestDto: { email, code: 6 digits }. No auth. Throttled 10/min. | 200 { status: "PENDING" }: request goes to admins (SIGNUP_REQUEST notification to every active ADMIN/MANAGER, live event { type: "signup" }). 400 "The code is wrong or has expired, so your request was not sent…" (5 wrong tries lock the code). 409 if an account with the email exists. |
+| GET /signup-requests?status= | JWT + ADMIN/MANAGER. status: PENDING (default), APPROVED, REJECTED or ALL (never UNVERIFIED). | Array (newest first, max 200) of { id, email, fullName, status, verifiedAt, reviewedAt, rejectionReason, createdAt, reviewedBy: { id, fullName } | null }. Password and code hashes are never returned. |
+| POST /signup-requests/:id/approve | JWT + ADMIN/MANAGER. Body { role?: "WORKER"|"MANAGER" } (default WORKER; ADMIN not allowed). | Creates the user with the password they chose; request APPROVED; USER_CREATED audit entry with details.source = "signup_request"; emails them that they can sign in. Returns the user { id, email, fullName, role, isActive }. 404 unknown or unverified, 409 already reviewed or email taken. |
+| POST /signup-requests/:id/reject | JWT + ADMIN/MANAGER. Body { reason?: string (max 300) }. | Request REJECTED (no account); emails them, with the reason if given. Returns the request. 409 if already reviewed. |
 | GET /auth/me | JwtAuthGuard | Bearer token, no body. | { id, email, fullName, role, avatarUrl: string or null }; 401 if invalid/expired/inactive. |
 
 ### Users controller (/users)
@@ -263,6 +271,7 @@ ConfigController and LegalController have no auth guards.
 
 | Method/path | Request | Response / validation |
 |---|---|---|
+| GET /events | JWT required (Authorization: Bearer). No body. Server-Sent Events (text/event-stream). | Live change notices for the signed-in user: `data: {"type":"task"|"comment"|"notification","taskId"?}`; `{"type":"ping"}` every 25 s. Task/comment events go to the task's previous and new assignee and to all ADMIN/MANAGER users; notification events to the recipient. Events carry only ids: reload through the normal endpoints. Sent after every successful POST/PATCH/DELETE on /tasks and /tasks/:id/comments, and when the reminder job marks a task OVERDUE. Browsers: EventSource cannot send the Authorization header, so read it with fetch() and a stream reader. Single backend instance only (in-process bus). |
 | GET /config/locales | No body. | { defaultLocale: "en", supportedLocales: ["en","ar"], legal: { termsUrlTemplate, privacyUrlTemplate, aboutUrlTemplate, howToUrlTemplate } }. Templates point to /public/legal/{lang}/<slug>.html. |
 | GET /legal/page?slug=<slug>&lang=<lang> | Required slug exact values terms, privacy, about, how-to; lang optional/default en. | HTML from public/legal/<lang>/<slug>.html; unsupported locale falls back to en. Missing/invalid slug is 400. If requested and English files are missing, 404 JSON { message, slug, lang }. |
 

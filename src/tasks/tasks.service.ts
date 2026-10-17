@@ -1,17 +1,31 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { unlink } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { PrismaService } from '../database/prisma.service.js';
-import { Prisma, type Task, TaskAttachmentKind, TaskPriority, TaskStatus, UserRole } from '@prisma/client';
+import {
+  AuditAction,
+  Prisma,
+  ReviewStatus,
+  type Task,
+  TaskAttachmentKind,
+  TaskPriority,
+  TaskStatus,
+  UserRole,
+} from '@prisma/client';
 import { CreateTaskDto } from './dto/create-task.dto.js';
 import { UpdateTaskDto } from './dto/update-task.dto.js';
 import { UpdateTaskStatusDto } from './dto/update-task-status.dto.js';
 import { CompleteTaskDto } from './dto/complete-task.dto.js';
 import type { RequestUser } from '../common/interfaces/authenticated-request.interface.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
+import { AuditService, diffFields } from '../audit/audit.service.js';
+import { ReviewTaskDto } from './dto/review-task.dto.js';
 
 const ALLOWED_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   ASSIGNED: ['IN_PROGRESS', 'CANCELLED'],
@@ -34,6 +48,21 @@ function sameValue(a: unknown, b: unknown): boolean {
   return a === b;
 }
 
+// Fields an admin can edit; changes to these are written to the audit log.
+const TRACKED_TASK_FIELDS = [
+  'title',
+  'description',
+  'titleAr',
+  'descriptionAr',
+  'priority',
+  'deadline',
+  'startDate',
+  'location',
+  'minPhotosRequired',
+  'minFilesRequired',
+  'requiresChecklist',
+] as const;
+
 function addDays(date: Date, days: number): Date {
   const result = new Date(date);
   result.setDate(result.getDate() + days);
@@ -45,6 +74,7 @@ export class TasksService {
   constructor(
     private prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly audit: AuditService,
   ) {}
 
   private async ensureAssigneeIsActiveWorker(assigneeId: string) {
@@ -53,6 +83,7 @@ export class TasksService {
     if (assignee.role !== UserRole.WORKER || !assignee.isActive) {
       throw new BadRequestException('Assignee must be an active WORKER');
     }
+    return assignee;
   }
 
   private assertCanAccess(task: { assigneeId: string | null }, user: RequestUser) {
@@ -64,28 +95,46 @@ export class TasksService {
   }
 
   async create(dto: CreateTaskDto, createdBy: RequestUser) {
-    if (dto.assigneeId) await this.ensureAssigneeIsActiveWorker(dto.assigneeId);
+    const assignee = dto.assigneeId ? await this.ensureAssigneeIsActiveWorker(dto.assigneeId) : null;
 
-    const task = await this.prisma.task.create({
-      data: {
-        title: dto.title,
-        description: dto.description,
-        titleAr: dto.titleAr,
-        descriptionAr: dto.descriptionAr,
-        priority: dto.priority as TaskPriority,
-        deadline: dto.deadline ? new Date(dto.deadline) : addDays(new Date(), 7),
-        startDate: dto.startDate ? new Date(dto.startDate) : undefined,
-        location: dto.location,
-        minPhotosRequired: dto.minPhotosRequired ?? 0,
-        minFilesRequired: dto.minFilesRequired ?? 0,
-        requiresChecklist: !!dto.checklistItems?.length,
-        assigneeId: dto.assigneeId ?? null,
-        createdById: createdBy.id,
-        checklistItems: dto.checklistItems
-          ? { create: dto.checklistItems.map((c: { label: string }) => ({ label: c.label })) }
-          : undefined,
-      },
-      include: { checklistItems: true, attachments: true },
+    const task = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.task.create({
+        data: {
+          title: dto.title,
+          description: dto.description,
+          titleAr: dto.titleAr,
+          descriptionAr: dto.descriptionAr,
+          priority: dto.priority as TaskPriority,
+          deadline: dto.deadline ? new Date(dto.deadline) : addDays(new Date(), 7),
+          startDate: dto.startDate ? new Date(dto.startDate) : undefined,
+          location: dto.location,
+          minPhotosRequired: dto.minPhotosRequired ?? 0,
+          minFilesRequired: dto.minFilesRequired ?? 0,
+          requiresChecklist: !!dto.checklistItems?.length,
+          assigneeId: dto.assigneeId ?? null,
+          createdById: createdBy.id,
+          checklistItems: dto.checklistItems
+            ? { create: dto.checklistItems.map((c: { label: string }) => ({ label: c.label })) }
+            : undefined,
+        },
+        include: { checklistItems: true, attachments: true },
+      });
+      await this.audit.record(
+        {
+          action: AuditAction.TASK_CREATED,
+          actorId: createdBy.id,
+          taskId: created.id,
+          targetUserId: created.assigneeId,
+          details: {
+            title: created.title,
+            assigneeName: assignee?.fullName ?? null,
+            priority: created.priority,
+            deadline: created.deadline?.toISOString() ?? null,
+          },
+        },
+        tx,
+      );
+      return created;
     });
     if (task.assigneeId) {
       await this.notifications.emitTaskAssigned(task, task.assigneeId, createdBy.id);
@@ -101,24 +150,44 @@ export class TasksService {
     // A new deadline may become overdue again later.
     const deadlineChanged =
       !!dto.deadline && new Date(dto.deadline).getTime() !== task.deadline?.getTime();
+    // A late task moved to a future deadline is no longer late.
+    const backOnTime =
+      deadlineChanged && task.status === TaskStatus.OVERDUE && new Date(dto.deadline!).getTime() > Date.now();
+    const resumeStatus = backOnTime ? await this.statusBeforeOverdue(taskId) : undefined;
 
-    const updated = await this.prisma.task.update({
-      where: { id: taskId },
-      data: {
-        title: dto.title ?? undefined,
-        description: dto.description ?? undefined,
-        titleAr: dto.titleAr ?? undefined,
-        descriptionAr: dto.descriptionAr ?? undefined,
-        priority: dto.priority ?? undefined,
-        deadline: dto.deadline ? new Date(dto.deadline) : undefined,
-        startDate: dto.startDate ? new Date(dto.startDate) : undefined,
-        location: dto.location ?? undefined,
-        minPhotosRequired: typeof dto.minPhotosRequired === 'number' ? dto.minPhotosRequired : undefined,
-        minFilesRequired: typeof dto.minFilesRequired === 'number' ? dto.minFilesRequired : undefined,
-        requiresChecklist: typeof dto.requiresChecklist === 'boolean' ? dto.requiresChecklist : undefined,
-        markedOverdueAt: deadlineChanged ? null : undefined,
-      },
-      include: { checklistItems: true, attachments: true },
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const next = await tx.task.update({
+        where: { id: taskId },
+        data: {
+          title: dto.title ?? undefined,
+          description: dto.description ?? undefined,
+          titleAr: dto.titleAr ?? undefined,
+          descriptionAr: dto.descriptionAr ?? undefined,
+          priority: dto.priority ?? undefined,
+          deadline: dto.deadline ? new Date(dto.deadline) : undefined,
+          startDate: dto.startDate ? new Date(dto.startDate) : undefined,
+          location: dto.location ?? undefined,
+          minPhotosRequired: typeof dto.minPhotosRequired === 'number' ? dto.minPhotosRequired : undefined,
+          minFilesRequired: typeof dto.minFilesRequired === 'number' ? dto.minFilesRequired : undefined,
+          requiresChecklist: typeof dto.requiresChecklist === 'boolean' ? dto.requiresChecklist : undefined,
+          markedOverdueAt: deadlineChanged ? null : undefined,
+          status: resumeStatus,
+        },
+        include: { checklistItems: true, attachments: true },
+      });
+      const changes = diffFields(task, next, [...TRACKED_TASK_FIELDS, 'status']);
+      if (Object.keys(changes).length > 0) {
+        await this.audit.record(
+          {
+            action: AuditAction.TASK_UPDATED,
+            actorId: actor.id,
+            taskId,
+            details: { title: next.title, changes },
+          },
+          tx,
+        );
+      }
+      return next;
     });
 
     const changed = NOTIFIED_FIELDS.filter(([key]) => !sameValue(task[key], updated[key])).map(
@@ -132,17 +201,75 @@ export class TasksService {
     return updated;
   }
 
+  /**
+   * The reminder job marks late tasks OVERDUE without noting what they were, so
+   * the audit log tells whether the worker had started (IN_PROGRESS) or not.
+   */
+  private async statusBeforeOverdue(taskId: string): Promise<TaskStatus> {
+    const last = await this.prisma.auditLog.findFirst({
+      where: {
+        taskId,
+        action: {
+          in: [
+            AuditAction.TASK_CREATED,
+            AuditAction.TASK_STARTED,
+            AuditAction.TASK_STATUS_CHANGED,
+            AuditAction.TASK_SENT_BACK,
+          ],
+        },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { action: true, details: true },
+    });
+    const details = (last?.details ?? {}) as { to?: string; toUserId?: string };
+    switch (last?.action) {
+      case AuditAction.TASK_STARTED:
+        return TaskStatus.IN_PROGRESS;
+      case AuditAction.TASK_STATUS_CHANGED:
+        return details.to === TaskStatus.IN_PROGRESS ? TaskStatus.IN_PROGRESS : TaskStatus.ASSIGNED;
+      case AuditAction.TASK_SENT_BACK:
+        // Back to the same worker resumes the work; a new worker starts over.
+        return details.toUserId ? TaskStatus.ASSIGNED : TaskStatus.IN_PROGRESS;
+      default:
+        return TaskStatus.ASSIGNED;
+    }
+  }
+
   async assignTask(taskId: string, assigneeId: string, actor: RequestUser) {
-    await this.ensureAssigneeIsActiveWorker(assigneeId);
-    const t = await this.prisma.task.findUnique({ where: { id: taskId } });
+    const assignee = await this.ensureAssigneeIsActiveWorker(assigneeId);
+    const t = await this.prisma.task.findUnique({
+      where: { id: taskId },
+      include: { assignee: { select: { fullName: true } } },
+    });
     if (!t) throw new NotFoundException('Task not found');
     if (['COMPLETED', 'CANCELLED'].includes(t.status)) {
       throw new BadRequestException('Cannot reassign a finalized task');
     }
-    const updated = await this.prisma.task.update({
-      where: { id: taskId },
-      data: { assigneeId },
-      include: { checklistItems: true, attachments: true },
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const next = await tx.task.update({
+        where: { id: taskId },
+        data: { assigneeId },
+        include: { checklistItems: true, attachments: true },
+      });
+      if (t.assigneeId !== assigneeId) {
+        await this.audit.record(
+          {
+            action: AuditAction.TASK_REASSIGNED,
+            actorId: actor.id,
+            taskId,
+            targetUserId: assigneeId,
+            details: {
+              title: t.title,
+              fromUserId: t.assigneeId,
+              fromName: t.assignee?.fullName ?? null,
+              toUserId: assigneeId,
+              toName: assignee.fullName,
+            },
+          },
+          tx,
+        );
+      }
+      return next;
     });
     // Re-assigning to the same worker is not a new event.
     if (t.assigneeId !== assigneeId) {
@@ -220,11 +347,42 @@ export class TasksService {
     if (!allowedNext.includes(dto.status)) {
       throw new BadRequestException(`Cannot transition task from ${task.status} to ${dto.status}`);
     }
-    const updated = await this.prisma.task.update({ where: { id: taskId }, data: { status: dto.status } });
+    // Completing here still counts as a submission, so it goes to review.
+    const submitted = dto.status === TaskStatus.COMPLETED;
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const next = await tx.task.update({
+        where: { id: taskId },
+        data: {
+          status: dto.status,
+          ...(submitted ? { reviewStatus: ReviewStatus.PENDING, reviewNote: null } : {}),
+        },
+      });
+      const action = submitted
+        ? AuditAction.TASK_SUBMITTED
+        : dto.status === TaskStatus.CANCELLED
+          ? AuditAction.TASK_CANCELLED
+          : dto.status === TaskStatus.IN_PROGRESS && task.status === TaskStatus.ASSIGNED
+            ? AuditAction.TASK_STARTED
+            : AuditAction.TASK_STATUS_CHANGED;
+      await this.audit.record(
+        {
+          action,
+          actorId: user.id,
+          taskId,
+          details: { title: task.title, from: task.status, to: dto.status },
+        },
+        tx,
+      );
+      return next;
+    });
     if (updated.status === TaskStatus.CANCELLED) {
       await this.notifications.emitTaskCancelled(updated, user.id);
     } else if (updated.status === TaskStatus.COMPLETED) {
-      await this.notifications.emitTaskSubmitted(updated, user.id);
+      await this.notifications.emitTaskSubmitted(
+        updated,
+        user.id,
+        task.reviewStatus === ReviewStatus.CHANGES_REQUESTED ? updated.updatedAt : undefined,
+      );
     }
     return updated;
   }
@@ -294,41 +452,239 @@ export class TasksService {
         await tx.taskAttachment.createMany({ data: attachmentRows });
       }
 
-      return tx.task.update({
+      const submittedAt = new Date();
+      const completed = await tx.task.update({
         where: { id: taskId },
         data: {
           status: 'COMPLETED',
           completionNotes: dto.notes,
-          completionTimestamp: new Date(),
+          completionTimestamp: submittedAt,
+          reviewStatus: ReviewStatus.PENDING,
+          reviewNote: null,
         },
         include: { checklistItems: true, attachments: true },
       });
+      await this.audit.record(
+        {
+          action: AuditAction.TASK_SUBMITTED,
+          actorId: user.id,
+          taskId,
+          details: {
+            title: task.title,
+            onTime: task.deadline ? submittedAt <= task.deadline : null,
+            photos: dto.photos?.length ?? 0,
+            files: dto.files?.length ?? 0,
+            resubmission: task.reviewStatus === ReviewStatus.CHANGES_REQUESTED,
+          },
+        },
+        tx,
+      );
+      return completed;
     });
-    await this.notifications.emitTaskSubmitted(completed, user.id);
+    await this.notifications.emitTaskSubmitted(
+      completed,
+      user.id,
+      task.reviewStatus === ReviewStatus.CHANGES_REQUESTED ? completed.completionTimestamp : undefined,
+    );
     return completed;
   }
 
+  // Review (admin/manager): approve, or send back with a note
+  async review(taskId: string, dto: ReviewTaskDto, actor: RequestUser) {
+    const task = await this.prisma.task.findUnique({ where: { id: taskId } });
+    if (!task) throw new NotFoundException('Task not found');
+    if (task.status !== TaskStatus.COMPLETED || task.reviewStatus !== ReviewStatus.PENDING) {
+      throw new BadRequestException('Only submitted tasks waiting for review can be reviewed');
+    }
+
+    const approve = dto.decision === 'APPROVE';
+    const note = dto.note?.trim() || null;
+    if (!approve && (!note || note.length < 3)) {
+      throw new BadRequestException('Add a note telling the worker what to fix');
+    }
+    if (approve && dto.assigneeId) {
+      throw new BadRequestException('A different worker can only be chosen when sending a task back');
+    }
+    const newAssignee =
+      !approve && dto.assigneeId && dto.assigneeId !== task.assigneeId
+        ? await this.ensureAssigneeIsActiveWorker(dto.assigneeId)
+        : null;
+    const previous =
+      newAssignee && task.assigneeId
+        ? await this.prisma.user.findUnique({ where: { id: task.assigneeId }, select: { fullName: true } })
+        : null;
+
+    const reviewed = await this.prisma.$transaction(async (tx) => {
+      const decided = { reviewNote: note, reviewedAt: new Date(), reviewedById: actor.id };
+      // Only matches while pending, so two reviewers can't both decide.
+      const result = await tx.task.updateMany({
+        where: { id: taskId, status: TaskStatus.COMPLETED, reviewStatus: ReviewStatus.PENDING },
+        data: approve
+          ? { ...decided, reviewStatus: ReviewStatus.APPROVED }
+          : {
+              ...decided,
+              reviewStatus: ReviewStatus.CHANGES_REQUESTED,
+              // Back to the same worker to fix; a different worker gets it as a fresh assignment.
+              status: newAssignee ? TaskStatus.ASSIGNED : TaskStatus.IN_PROGRESS,
+              completionTimestamp: null,
+              ...(newAssignee ? { assigneeId: newAssignee.id } : {}),
+            },
+      });
+      if (result.count !== 1) throw new ConflictException('This submission was already reviewed');
+      if (newAssignee) {
+        // New worker starts with an unticked checklist.
+        await tx.taskChecklistItem.updateMany({ where: { taskId }, data: { done: false } });
+      }
+
+      await this.audit.record(
+        {
+          action: approve ? AuditAction.TASK_APPROVED : AuditAction.TASK_SENT_BACK,
+          actorId: actor.id,
+          taskId,
+          targetUserId: newAssignee?.id ?? task.assigneeId,
+          details: newAssignee
+            ? {
+                title: task.title,
+                note,
+                fromUserId: task.assigneeId,
+                fromName: previous?.fullName ?? null,
+                toUserId: newAssignee.id,
+                toName: newAssignee.fullName,
+              }
+            : { title: task.title, note },
+        },
+        tx,
+      );
+      return tx.task.findUniqueOrThrow({
+        where: { id: taskId },
+        include: { checklistItems: true, attachments: true },
+      });
+    });
+
+    if (newAssignee) {
+      await this.notifications.emitTaskSentBack(reviewed, newAssignee.id, note, actor.id, true);
+      if (task.assigneeId) {
+        await this.notifications.emitTaskUnassigned(reviewed, task.assigneeId, actor.id);
+      }
+    } else if (approve) {
+      await this.notifications.emitTaskApproved(reviewed, note, actor.id);
+    } else {
+      await this.notifications.emitTaskSentBack(reviewed, reviewed.assigneeId, note, actor.id);
+    }
+    return reviewed;
+  }
+
+  // Delete (admin/manager): checklist, attachments and comments cascade; notifications and audit entries stay unlinked.
+  async deleteTask(taskId: string, actor: RequestUser) {
+    const task = await this.prisma.task.findUnique({
+      where: { id: taskId },
+      include: {
+        attachments: { select: { url: true } },
+        assignee: { select: { fullName: true } },
+        _count: { select: { comments: true, checklistItems: true } },
+      },
+    });
+    if (!task) throw new NotFoundException('Task not found');
+
+    await this.prisma.$transaction(async (tx) => {
+      await this.audit.record(
+        {
+          action: AuditAction.TASK_DELETED,
+          actorId: actor.id,
+          targetUserId: task.assigneeId,
+          details: {
+            title: task.title,
+            deletedTaskId: task.id,
+            status: task.status,
+            assigneeName: task.assignee?.fullName ?? null,
+            attachments: task.attachments.length,
+            comments: task._count.comments,
+            checklistItems: task._count.checklistItems,
+          },
+        },
+        tx,
+      );
+      await tx.task.delete({ where: { id: taskId } });
+    });
+
+    const stillOpen: TaskStatus[] = [TaskStatus.ASSIGNED, TaskStatus.IN_PROGRESS, TaskStatus.OVERDUE];
+    if (stillOpen.includes(task.status)) {
+      await this.notifications.emitTaskDeleted(task, task.assigneeId, actor.id);
+    }
+
+    // Remove the uploaded files too (basename only, so a stored url can't point outside uploads/).
+    await Promise.all(
+      task.attachments
+        .filter((a) => a.url.startsWith('/uploads/'))
+        .map((a) => unlink(join(process.cwd(), 'uploads', basename(a.url))).catch(() => undefined)),
+    );
+    return { success: true };
+  }
+
   // Checklist CRUD (admin/manager)
-  async addChecklistItem(taskId: string, dto: { label: string }) {
-    await this.ensureTaskExists(taskId);
-    return this.prisma.taskChecklistItem.create({
-      data: { taskId, label: dto.label },
+  async addChecklistItem(taskId: string, dto: { label: string }, actor: RequestUser) {
+    const task = await this.ensureTaskExists(taskId);
+    return this.prisma.$transaction(async (tx) => {
+      const item = await tx.taskChecklistItem.create({
+        data: { taskId, label: dto.label },
+      });
+      await this.audit.record(
+        {
+          action: AuditAction.CHECKLIST_ITEM_ADDED,
+          actorId: actor.id,
+          taskId,
+          details: { title: task.title, label: item.label },
+        },
+        tx,
+      );
+      return item;
     });
   }
 
-  async updateChecklistItem(taskId: string, itemId: string, dto: { label?: string }) {
-    const item = await this.prisma.taskChecklistItem.findUnique({ where: { id: itemId } });
-    if (!item || item.taskId !== taskId) throw new NotFoundException('Checklist item not found');
-    return this.prisma.taskChecklistItem.update({
+  async updateChecklistItem(taskId: string, itemId: string, dto: { label?: string }, actor: RequestUser) {
+    const item = await this.prisma.taskChecklistItem.findUnique({
       where: { id: itemId },
-      data: { label: dto.label ?? undefined },
+      include: { task: { select: { title: true } } },
+    });
+    if (!item || item.taskId !== taskId) throw new NotFoundException('Checklist item not found');
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.taskChecklistItem.update({
+        where: { id: itemId },
+        data: { label: dto.label ?? undefined },
+      });
+      if (updated.label !== item.label) {
+        await this.audit.record(
+          {
+            action: AuditAction.CHECKLIST_ITEM_RENAMED,
+            actorId: actor.id,
+            taskId,
+            details: { title: item.task.title, from: item.label, to: updated.label },
+          },
+          tx,
+        );
+      }
+      return updated;
     });
   }
 
-  async deleteChecklistItem(taskId: string, itemId: string) {
-    const item = await this.prisma.taskChecklistItem.findUnique({ where: { id: itemId } });
+  async deleteChecklistItem(taskId: string, itemId: string, actor: RequestUser) {
+    const item = await this.prisma.taskChecklistItem.findUnique({
+      where: { id: itemId },
+      include: { task: { select: { title: true } } },
+    });
     if (!item || item.taskId !== taskId) throw new NotFoundException('Checklist item not found');
-    await this.prisma.taskChecklistItem.delete({ where: { id: itemId } });
+    await this.prisma.$transaction(async (tx) => {
+      await tx.taskChecklistItem.delete({ where: { id: itemId } });
+      await this.audit.record(
+        {
+          action: AuditAction.CHECKLIST_ITEM_REMOVED,
+          actorId: actor.id,
+          taskId,
+          details: { title: item.task.title, label: item.label },
+        },
+        tx,
+      );
+    });
     return { success: true };
   }
 
@@ -340,7 +696,7 @@ export class TasksService {
   ) {
     const task = await this.prisma.task.findUnique({
       where: { id: taskId },
-      select: { assigneeId: true },
+      select: { assigneeId: true, title: true },
     });
     if (!task) throw new NotFoundException('Task not found');
     this.assertCanAccess(task, user);
@@ -348,14 +704,26 @@ export class TasksService {
     const kind: TaskAttachmentKind =
       data.kind === 'PHOTO' ? TaskAttachmentKind.COMPLETION_PHOTO : TaskAttachmentKind.COMPLETION_FILE;
     const url = `/uploads/${data.filename}`;
-    return this.prisma.taskAttachment.create({
-      data: {
-        taskId,
-        kind,
-        url,
-        mimeType: data.mimeType,
-        sizeBytes: data.sizeBytes,
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const attachment = await tx.taskAttachment.create({
+        data: {
+          taskId,
+          kind,
+          url,
+          mimeType: data.mimeType,
+          sizeBytes: data.sizeBytes,
+        },
+      });
+      await this.audit.record(
+        {
+          action: AuditAction.ATTACHMENT_UPLOADED,
+          actorId: user.id,
+          taskId,
+          details: { title: task.title, kind, mimeType: data.mimeType, url },
+        },
+        tx,
+      );
+      return attachment;
     });
   }
 
@@ -366,15 +734,30 @@ export class TasksService {
     return this.prisma.taskAttachment.findMany({ where: { taskId }, orderBy: { createdAt: 'desc' } });
   }
 
-  async deleteAttachment(taskId: string, attId: string) {
-    const a = await this.prisma.taskAttachment.findUnique({ where: { id: attId } });
+  async deleteAttachment(taskId: string, attId: string, actor: RequestUser) {
+    const a = await this.prisma.taskAttachment.findUnique({
+      where: { id: attId },
+      include: { task: { select: { title: true } } },
+    });
     if (!a || a.taskId !== taskId) throw new NotFoundException('Attachment not found');
-    await this.prisma.taskAttachment.delete({ where: { id: attId } });
+    await this.prisma.$transaction(async (tx) => {
+      await tx.taskAttachment.delete({ where: { id: attId } });
+      await this.audit.record(
+        {
+          action: AuditAction.ATTACHMENT_REMOVED,
+          actorId: actor.id,
+          taskId,
+          details: { title: a.task.title, kind: a.kind, url: a.url },
+        },
+        tx,
+      );
+    });
     return { success: true };
   }
 
   private async ensureTaskExists(id: string) {
     const t = await this.prisma.task.findUnique({ where: { id } });
     if (!t) throw new NotFoundException('Task not found');
+    return t;
   }
 }

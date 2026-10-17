@@ -11,6 +11,11 @@ import { TasksModule } from './tasks/tasks.module.js';
 import { UsersModule } from './users/users.module.js';
 import { ContentModule } from './content/content.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
+import { AuditModule } from './audit/audit.module.js';
+import { RealtimeModule } from './realtime/realtime.module.js';
+import { MailModule } from './mail/mail.module.js';
+import { SignupModule } from './signup/signup.module.js';
+import { JobRolesModule } from './job-roles/job-roles.module.js';
 
 @Module({
   imports: [
@@ -29,11 +34,16 @@ import { NotificationsModule } from './notifications/notifications.module.js';
       },
     ),
     PrismaModule,
+    RealtimeModule,
+    MailModule,
     AuthModule,
     UsersModule,
     TasksModule,
     NotificationsModule,
     ContentModule,
+    AuditModule,
+    SignupModule,
+    JobRolesModule,
   ],
 })
 export class AppModule {}

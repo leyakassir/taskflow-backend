@@ -5,6 +5,7 @@ import { CronJob } from 'cron';
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { PrismaService } from '../database/prisma.service.js';
 import { NotificationsService, type OverdueTask } from './notifications.service.js';
+import { RealtimeService } from '../realtime/realtime.service.js';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -55,6 +56,7 @@ export class RemindersService implements OnModuleInit {
     private readonly notifications: NotificationsService,
     private readonly config: ConfigService,
     private readonly scheduler: SchedulerRegistry,
+    private readonly realtime: RealtimeService,
   ) {}
 
   onModuleInit() {
@@ -129,7 +131,11 @@ export class RemindersService implements OnModuleInit {
         where: { ...where, id: task.id },
         data: { status: TaskStatus.OVERDUE, markedOverdueAt: now },
       });
-      if (count === 1) await this.notifications.emitOverdue(task);
+      if (count === 1) {
+        // The status changed without a request, so tell open apps directly.
+        this.realtime.taskChanged(task.id, [task.assigneeId]);
+        await this.notifications.emitOverdue(task);
+      }
     });
   }
 

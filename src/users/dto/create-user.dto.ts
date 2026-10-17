@@ -1,4 +1,4 @@
-import { IsEmail, IsEnum, IsNotEmpty, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsEnum, IsNotEmpty, IsOptional, IsString, MinLength } from 'class-validator';
 import { UserRole } from '@prisma/client';
 
 export class CreateUserDto {
@@ -11,6 +11,11 @@ export class CreateUserDto {
 
   @IsEnum(UserRole)
   role!: UserRole;
+
+  /** A company role from /job-roles. When set, its access level replaces role. */
+  @IsOptional()
+  @IsString()
+  jobRoleId?: string;
 
   @IsString()
   @MinLength(8)

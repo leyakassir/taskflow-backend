@@ -8,6 +8,7 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
@@ -19,6 +20,7 @@ import { SetUserActiveDto } from './dto/set-user-active.dto.js';
 import { JwtAuthGuard } from '../auth/jwt.guard.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { RolesGuard } from '../common/guards/roles.guard.js';
+import type { AuthenticatedRequest } from '../common/interfaces/authenticated-request.interface.js';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.ADMIN, UserRole.MANAGER)
@@ -27,8 +29,8 @@ export class UsersController {
   constructor(private readonly users: UsersService) {}
 
   @Post()
-  create(@Body() dto: CreateUserDto) {
-    return this.users.create(dto);
+  create(@Body() dto: CreateUserDto, @Req() req: AuthenticatedRequest) {
+    return this.users.create(dto, req.user);
   }
 
   @Get()
@@ -46,17 +48,21 @@ export class UsersController {
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() dto: UpdateUserDto) {
-    return this.users.update(id, dto);
+  update(@Param('id') id: string, @Body() dto: UpdateUserDto, @Req() req: AuthenticatedRequest) {
+    return this.users.update(id, dto, req.user);
   }
 
   @Patch(':id/password')
-  updatePassword(@Param('id') id: string, @Body() dto: UpdatePasswordDto) {
-    return this.users.updatePassword(id, dto);
+  updatePassword(
+    @Param('id') id: string,
+    @Body() dto: UpdatePasswordDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.users.updatePassword(id, dto, req.user);
   }
 
   @Patch(':id/active')
-  setActive(@Param('id') id: string, @Body() dto: SetUserActiveDto) {
-    return this.users.setActive(id, dto.isActive);
+  setActive(@Param('id') id: string, @Body() dto: SetUserActiveDto, @Req() req: AuthenticatedRequest) {
+    return this.users.setActive(id, dto.isActive, req.user);
   }
 }
